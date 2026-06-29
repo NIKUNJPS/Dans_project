@@ -1,0 +1,45 @@
+{
+  "summary": "Comprehensive backend+frontend e2e testing of StructMind AI. 23/23 pytest backend tests pass (health, auth with 3 OTP flows, projects CRUD, file upload w/ SHA-256, 25 AI modes, analysis run via Gemini 2.5 Pro + 5-format export download, RFI CRUD with status transitions, dashboard stats, notifications, admin endpoints, role enforcement 403 on PHASE_2, blockchain verify). Frontend UI verified: landing (10 sections), login/signup/OTP flows, sidebar nav across all 7 sections, RFI kanban 4-column board, Outputs with 5 export buttons + SHA-256 badge, admin portal, logout.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "gemini_service._MODEL_CHAIN", "issue": "Fallback model 'gemini-2.5-flash-lite' is not accepted by the emergent LLM proxy (returns BadRequestError Invalid model name). When budget/quota caps on 2.5-pro and 2.5-flash, the chain falls through to an invalid model and fails. Consider removing 'gemini-2.5-flash-lite' from _MODEL_CHAIN or replacing with a supported model."},
+      {"endpoint": "GET /api/analyses/modes mode schema", "issue": "Each mode object does NOT include the raw 'roles' array (only an evaluated 'allowed' boolean). Contract in request said 'roles' should be present; minor API/spec mismatch."},
+      {"endpoint": "GET /api/projects and /api/admin/users", "issue": "Both return paginated shape {items:[], total:N} whereas the review request text implied a bare array. The shape is internally consistent and fine, but clients must handle the wrapper."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Landing page", "issues": ["Counted 10 <section> elements (spec called for 11) – may be nav rendered as <header>. Non-blocking."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Review gemini_service._MODEL_CHAIN: drop 'gemini-2.5-flash-lite' or replace with 'gemini-2.0-flash'/another allowed model; today the third fallback always errors out with 'Invalid model name'.",
+    "Optional: include original 'roles' list (not just computed 'allowed') in /api/analyses/modes for richer client UX.",
+    "EMERGENT_LLM_KEY budget is very low (observed 'Max budget: 0.001' in LiteLLM error during re-runs); ensure production key has adequate budget. Not a code bug."
+  ],
+  "critical_code_review_comments": [
+    "gemini_service.py fallback chain includes an unsupported model name, causing permanent failure when primary/secondary budgets are hit.",
+    "No unit tests in /app/backend/tests prior to this run; added /app/backend/tests/backend_test.py covering 23 scenarios (reusable as regression suite).",
+    "Signup schema validates EmailStr strictly, which rejects reserved TLDs like .local and .test. Prefer .com/.org for automated tests (documented in test file).",
+    "All API responses correctly exclude MongoDB _id (spot-checked projects, analyses, rfis, files, auth/me).",
+    "SHA-256 blockchain_hash is 64-char hex and validates via /api/blockchain/verify end-to-end.",
+    "5 export formats (markdown/csv/xlsx/docx/pdf) auto-generated after Gemini completion and individually downloadable."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100% (23/23)", "frontend": "100% of attempted flows"},
+  "test_credentials": "Admin: niks.shah236@gmail.com / Nikunj@1405. OTP flows use dev email from /var/log/supervisor/backend.err.log 'DEV EMAIL' blocks (grep code after 'code is:').",
+  "seed_data_creation": "Super admin is auto-seeded on startup. Tests create ephemeral TEST_*/e2e+<ts>@example.com users and TEST_Proj_* projects; these persist in Mongo but are harmless.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Use /app/backend/tests/backend_test.py (pytest) as regression suite. _grep_otp helper extracts the 6-digit code by matching 'code is:' (the email address itself contains timestamp digits, so naive \\d{6} matches the wrong digits). Signup requires first_name/last_name (not full_name) and a real TLD (not .local). Projects/Admin list endpoints return {items,total}. Modes endpoint returns {items:[]} shape; each mode has keys id/label/group/pro/allowed/icon/description/time (no raw 'roles' key). Gemini analysis completes within ~20-35s when budget permits; fallback chain fails on 'gemini-2.5-flash-lite'.",
+  "rca of the issue": "Gemini analysis failures RCA: Model chain in /app/backend/gemini_service.py line 19-21 lists ['gemini-2.5-pro','gemini-2.5-flash','gemini-2.5-flash-lite']. The emergent LLM proxy accepts the first two but rejects the third with '/chat/completions: Invalid model name passed in model=gemini/gemini-2.5-flash-lite'. Separately, the key's budget cap can be hit (observed 'Max budget: 0.001 exceeded'), causing the first two to fail and cascade to the invalid third. Mitigation: remove gemini-2.5-flash-lite from the chain (or swap to gemini-2.0-flash) AND raise the LLM budget. Core path works end-to-end – analysis completed successfully in the final pytest run with model_used=gemini-2.5-pro, output_markdown non-empty, 64-char blockchain_hash, 5 exports, blockchain verify true."
+}

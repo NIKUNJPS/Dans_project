@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration-2 testing (engine rebrand + 2nd admin + /api/analyses/demo + Role Guide). Backend: 10/13 pytest passes; 2 fails + 1 error were all concurrency-induced HTTP read-timeouts (not functional bugs) — when multiple Gemini background tasks run simultaneously they saturate the uvicorn event loop and short-timeout HTTP requests to the public ingress time out. Manual curl of the same endpoints returns in <200ms. Frontend: Sora font applied on /login + /dashboard headings (fontFamily='Sora, sans-serif'), both admins login, /dashboard shows 'Role Guide' button + 'Flex every mode' Demo Console callout, sidebar has 'Role Guide' nav between Analyze and RFI Tracker, /roles page renders 6 role tabs, mode cards with Preview + Demo, and 11 admin-run-locked buttons (admin bypass). No 'gemini' text on /login, /dashboard, or /roles.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/analyses/demo (concurrency)", "issue": "When multiple demos are fired in rapid succession, subsequent HTTP requests (including simple GETs like /projects, /admin/users, /analyses/demo) intermittently time out beyond 20-30s despite the endpoints themselves being fast (<200ms in isolation). Root cause: emergentintegrations LlmChat.send_message appears to block the asyncio event loop (likely sync HTTP under the hood), so concurrent background tasks starve the FastAPI loop. Consider running LLM calls in a threadpool (asyncio.to_thread) or a separate worker process."},
+      {"endpoint": "gemini_service.MODEL_CHAIN", "issue": "Previously-reported 'gemini-2.5-flash-lite' fallback was removed in this iteration — chain is now ['gemini-2.5-pro','gemini-2.5-flash']. Good fix; verified."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration2.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/iteration2_results.xml"
+  ],
+  "action_items": [
+    "Investigate LLM background-task concurrency: wrap emergentintegrations.LlmChat.send_message in asyncio.to_thread OR move /demo fire-and-forget to a background worker queue — currently multiple simultaneous demo runs block simple GETs on the same event loop.",
+    "Consider rate-limiting /api/analyses/demo to 1 concurrent run per user so admins cannot accidentally queue 25 parallel LLM calls from the Role Guide and stall the server."
+  ],
+  "critical_code_review_comments": [
+    "BackgroundTasks in FastAPI run on the same event loop as HTTP handlers — with emergentintegrations doing (likely) sync I/O inside async methods, heavy parallel LLM usage will stall the whole backend. Validated by observing read-timeouts on /projects during concurrent LLM calls.",
+    "/api/analyses/demo correctly enforces role-lock for non-admins (returns 403 on PHASE_2 for an estimator) and admin bypass works (all 6 role-locked tests passed individually).",
+    "Engine rebrand is clean: ENGINE_LABELS map gemini-2.5-pro → 'STRUCTMIND CORE · PRO'; no 'gemini' string found in /api/dashboard/stats or /api/analyses/{id} JSON responses (confirmed via test_no_gemini_leak_in_dashboard_stats).",
+    "/api/analyses/modes now includes 'roles' array and 'demo_prompt' per mode — 25/25 modes validated, all allowed=true for admin.",
+    "Both super admins (niks + lalit) seed-in with role=admin, subscription_tier=enterprise, is_verified=true — verified in test_admin2_login_and_shape.",
+    "Sidebar 'Role Guide' nav correctly placed between Analyze and RFI Tracker (confirmed in screenshot + DOM).",
+    "Sora font applied globally: computed fontFamily on h1 elements = 'Sora, sans-serif' on login + dashboard."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration2.py"
+  ],
+  "success_rate": {"backend": "77% (10/13) — 3 failures all transient timeouts, not functional", "frontend": "100% of attempted flows"},
+  "test_credentials": "Admin1: niks.shah236@gmail.com / Nikunj@1405. Admin2 (NEW): lalit@4xstruct.com / Lalit@4xstruct. Both admin/enterprise/verified.",
+  "seed_data_creation": "Uses auto-seeded admins; test creates ephemeral demo analyses and one estimator signup per run. Harmless in Mongo.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Use /app/backend/tests/test_iteration2.py as regression for iteration-2 features (lalit admin, /demo endpoint, engine rebrand, roles+demo_prompt in /modes). Fail tests are all HTTP read-timeouts from concurrency, not functional bugs — re-run one-by-one if needed. The /api/analyses/demo endpoint has an event-loop starvation issue when many LLM tasks run in parallel. Frontend selectors: dashboard-role-guide, dashboard-open-role-guide, role-tab-{roleId}, role-mode-{id}, preview-{id}, run-demo-{id}, admin-run-locked-{id}, modal-run-{id}.",
+  "rca of the issue": "3 pytest failures all share the same root cause: emergentintegrations.LlmChat.send_message appears to do synchronous I/O under the async facade. FastAPI BackgroundTasks run in the same event loop. When test_demo_completes_with_structmind_label and test_admin_can_demo_role_locked_modes each trigger a new background LLM call, the event loop is blocked on LiteLLM streaming for tens of seconds, causing subsequent /api/analyses/demo POSTs (and even trivial /api/projects GETs) to exceed 20-30s HTTP read timeouts. Mitigation: (a) wrap run_analysis in asyncio.to_thread when dispatching the background task, or (b) offload to a dedicated worker (celery/rq) and stream status from a separate process. Functional correctness of /demo is validated in isolation: admin can demo every mode, non-admin estimator is correctly 403ed on PHASE_2, model_used returns STRUCTMIND CORE label (not gemini-*), exports generate. Lalit admin login + Sora font + Role Guide page all work perfectly on the frontend."
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="2" skipped="0" tests="13" time="168.841" timestamp="2026-04-24T19:18:42.942633+00:00" hostname="agent-env-5d809cfc-e937-48e7-9ad8-5cb9c0aa8125"><testcase classname="backend.tests.test_iteration2" name="test_admin2_login_and_shape" time="0.485" /><testcase classname="backend.tests.test_iteration2" name="test_admin1_still_works" time="0.341" /><testcase classname="backend.tests.test_iteration2" name="test_modes_has_roles_and_demo_prompt" time="0.456" /><testcase classname="backend.tests.test_iteration2" name="test_demo_completes_with_structmind_label" time="30.212"><failure message="requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=30)">E   TimeoutError: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+E   urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=30)
+
+During handling of the above exception, another exception occurred:
+E   requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=30)</failure></testcase><testcase classname="backend.tests.test_iteration2" name="test_no_gemini_leak_in_analysis_doc" time="20.127"><failure message="requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=20)">E   TimeoutError: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+E   urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=20)
+
+During handling of the above exception, another exception occurred:
+E   requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=20)</failure></testcase><testcase classname="backend.tests.test_iteration2" name="test_no_gemini_leak_in_dashboard_stats" time="3.596" /><testcase classname="backend.tests.test_iteration2" name="test_admin_can_demo_role_locked_modes[SAFETY_PLAN]" time="0.144" /><testcase classname="backend.tests.test_iteration2" name="test_admin_can_demo_role_locked_modes[STRUCTURAL_CLASH_DETECTOR]" time="47.183" /><testcase classname="backend.tests.test_iteration2" name="test_admin_can_demo_role_locked_modes[SUSTAINABILITY_REPORT]" time="29.884" /><testcase classname="backend.tests.test_iteration2" name="test_non_admin_estimator_forbidden_on_phase_2_demo" time="20.084"><error message="failed on setup with &quot;requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=20)&quot;">E   TimeoutError: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+E   urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=20)
+
+During handling of the above exception, another exception occurred:
+E   requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='steel-intel-1.preview.emergentagent.com', port=443): Read timed out. (read timeout=20)</error></testcase><testcase classname="backend.tests.test_iteration2" name="test_regression_projects_list" time="15.959" /><testcase classname="backend.tests.test_iteration2" name="test_regression_admin_users" time="0.141" /><testcase classname="backend.tests.test_iteration2" name="test_regression_rfis_list" time="0.123" /></testsuite></testsuites>

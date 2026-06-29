@@ -1,0 +1,40 @@
+{
+  "summary": "v4.0.0 3-role refactor — comprehensive backend + targeted frontend testing. 32/32 pytest passed (100%) covering auth/role refactor, super-admin CRUD, feature_permissions, impersonation read-only JWT, fabricator cost-band estimation, analytics, audit log, mode catalog, country lock, file-size cap, disable rules. Frontend smoke: both super_admins login, sidebar shows PLATFORM + SUPER ADMIN groups (Users/Permissions/Audit Log/Analytics), all 4 admin routes load without errors, AnalyzeWizard renders the prompt-scaffold modes (11 placeholder modes labeled 'PASTE YOUR LABEL' — by design), Estimation page renders for super_admin.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard / Admin Analytics", "issues": ["Recharts container emits repeated warnings: 'The width(-1) and height(-1) of chart should be greater than 0…'. ResponsiveContainer parent lacks explicit minWidth/minHeight or aspect. Not visually broken but pollutes console and may cause empty chart frames on first paint."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v4_architecture.py",
+    "/app/test_reports/pytest/iteration3_results.xml"
+  ],
+  "action_items": [
+    "(Low) Fix Recharts ResponsiveContainer parents on Dashboard & AdminAnalytics — add minWidth/minHeight or fixed aspect to silence width(-1)/height(-1) warnings.",
+    "(Info) The Analyze Wizard correctly surfaces blank-scaffold mode stubs to super_admin (labels = 'MODE n — PASTE YOUR LABEL', desc = 'Paste your mode description here.'). These come from prompts/detailer_prompts.py + fabricator_prompts.py and are expected until the user pastes real prompt content. For non-super-admin detailers with empty allowedModes, /api/analyses/modes correctly returns [] (verified by test_modes_for_detailer_empty)."
+  ],
+  "critical_code_review_comments": [
+    "Architecture is clean: Role literal is locked to ('super_admin','detailer','fabricator') in models.py and Pydantic correctly 422s legacy roles ('engineer','admin') on /api/auth/signup.",
+    "Super-admin guard chain is well layered: get_super_admin → get_current_user → block_write_if_readonly. Impersonation tokens carry read_only=true and are correctly rejected on POST /api/analyses (test_impersonate_readonly verified 403 'Impersonation session — read only.').",
+    "Estimation contract for fabricator is enforced at API boundary (routes/estimation.py L114-121): missing/zero cost_per_ton_low|high → 422. Detailer estimation requires canRunEstimation=true (correctly default-false for detailers, default-true for fabricators per permissions.py L29).",
+    "Country lock-down working: detailer/fabricator with estimationCountries=['USA'] gets 403 on Canada estimate and /api/estimation/countries filters to USA only.",
+    "File size cap enforced both streaming (during chunked write, files.py L67) and post-write (check_file_size). 1MB capped user uploading 2MB → 413 confirmed.",
+    "Disable rules correct: self-disable → 400, super-admin disable → 403, normal user → 200.",
+    "Edit-super-admin-perms guard returns 400 with message 'Super admins have wildcard permissions; cannot edit.' as required.",
+    "Audit log entries created for login, admin.user.create, admin.permissions.update, admin.impersonate, estimation.calculate (verified by querying /api/admin/audit-log).",
+    "(Minor) Backwards-compat alias get_current_admin in security.py L174 still exists — safe to remove now that admin.py uses get_super_admin everywhere.",
+    "(Minor) auth.py login _audit helper duplicates middleware/permission_guard.audit_log logic — consider consolidating.",
+    "(Minor) routes/estimation.py POST /calculate persists estimate but does not record audit entry for impersonated read-only sessions — block_write_if_readonly already blocks them earlier, so safe."
+  ],
+  "updated_files": ["/app/backend/tests/test_v4_architecture.py"],
+  "success_rate": {"backend": "100% (32/32)", "frontend": "100% of attempted smoke flows"},
+  "test_credentials": "Super admin 1: niks.shah236@gmail.com / Nikunj@1405. Super admin 2: lalit@4xstruct.com / Lalit@4xstruct. Both seeded automatically.",
+  "seed_data_creation": "Created several TEST_ prefixed users (detailer + fabricator) via /api/admin/users for permission and estimation tests. One detailer was disabled by test_disable_user_rules.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Use /app/backend/tests/test_v4_architecture.py as the canonical v4.0.0 regression. Older /app/backend/tests/test_iteration2.py and backend_test.py are STALE (assume 7-role system). The prompts/*.py scaffolds intentionally contain 11 placeholder modes per role labelled 'MODE n — PASTE YOUR LABEL'; super_admin sees them flattened (so AnalyzeWizard shows 11 cards) but a fresh detailer with allowedModes=[] correctly sees nothing. When real prompts are pasted, only mode-id list will change. Frontend test gotcha: many labels are CSS-uppercased — use case-insensitive checks (e.g. /detailer/i) when scanning innerText. Estimation 'visible' key wraps grand_low/mid/high for fabricator and total_hours/timeline_weeks/final_amount for detailer.",
+  "rca of the issue": "No bugs found. The earlier-iteration concurrency timeout RCA (LLM background tasks blocking event loop) is now moot for this iteration since /api/analyses/demo no longer exists in v4.0.0 — analyses go through the standard POST /api/analyses path which still uses BackgroundTasks but is not exercised in this test suite. If the LLM concurrency issue resurfaces under real workload, wrap gemini_service.run_analysis with asyncio.to_thread or offload to a worker queue."
+}

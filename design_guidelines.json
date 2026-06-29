@@ -1,0 +1,115 @@
+{
+  "theme": "Light",
+  "archetype": "Archetype 4 (Swiss & High-Contrast) + Industrial Custom",
+  "colors": {
+    "primary": {
+      "DEFAULT": "#0d2240",
+      "foreground": "#ffffff",
+      "mid": "#1a3a5c"
+    },
+    "accent": {
+      "DEFAULT": "#f5a800",
+      "foreground": "#1a2d44",
+      "light": "#ffd166",
+      "pale": "#fff8e6"
+    },
+    "background": {
+      "DEFAULT": "#f7f9fc"
+    },
+    "text": {
+      "DEFAULT": "#1a2d44",
+      "muted": "#6b8299"
+    },
+    "border": {
+      "DEFAULT": "#e2eaf2",
+      "technical": "#1a3a5c33"
+    },
+    "status": {
+      "critical": "#ef4444",
+      "success": "#16a34a",
+      "warning": "#f59e0b"
+    }
+  },
+  "typography": {
+    "font_family": {
+      "heading": "'Barlow Condensed', sans-serif",
+      "body": "'IBM Plex Sans', sans-serif",
+      "mono": "'JetBrains Mono', monospace"
+    },
+    "hierarchy": {
+      "h1": "text-5xl sm:text-6xl font-bold tracking-tight uppercase",
+      "h2": "text-3xl sm:text-4xl font-bold tracking-tight uppercase",
+      "h3": "text-xl sm:text-2xl font-semibold tracking-tight uppercase",
+      "h4": "text-lg sm:text-xl font-medium uppercase tracking-wider",
+      "body": "text-base leading-relaxed text-text",
+      "small": "text-sm text-text-muted",
+      "overline": "text-xs font-bold tracking-[0.2em] uppercase text-accent"
+    },
+    "rules": [
+      "NO INTER or ROBOTO allowed.",
+      "Headings must use tight letter spacing (tracking-tight) and be strictly Barlow Condensed.",
+      "Uppercase preferred for all structural elements (nav, tabs, cards).",
+      "Mono font exclusively for data blocks, code, file names, blockchain hashes, and stats."
+    ]
+  },
+  "spacing_and_layout": {
+    "generous_scale": ["p-6", "p-8", "p-12", "p-16", "p-24", "p-32"],
+    "grid_borders": "border-collapse pattern with 1px border-border",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+    "marketing_grid": "grid-cols-1 md:grid-cols-8 lg:grid-cols-12 gap-8 lg:gap-12",
+    "surface_strategy": {
+      "auth_left_split": "bg-primary flex flex-col justify-between p-12 relative overflow-hidden",
+      "auth_right_split": "bg-white flex flex-col items-center justify-center p-8 md:p-24",
+      "dashboard_sidebar": "w-64 bg-primary text-white h-screen flex flex-col flex-shrink-0 border-r border-primary-mid",
+      "dashboard_topbar": "h-16 border-b border-border bg-white px-8 flex items-center justify-between",
+      "cards": "bg-white border border-border rounded-none shadow-sm hover:shadow-md transition-shadow",
+      "glassmorphism": "backdrop-blur-xl bg-white/70 border-b border-border"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary hover:bg-primary-mid text-white rounded-none px-6 py-3 font-medium uppercase tracking-wide",
+      "accent": "bg-accent hover:bg-accent-light text-primary rounded-none px-6 py-3 font-bold uppercase tracking-wide",
+      "outline": "border-2 border-primary text-primary hover:bg-primary hover:text-white rounded-none px-6 py-3 uppercase tracking-wide font-medium"
+    },
+    "inputs": {
+      "text": "border-border rounded-none focus:ring-2 focus:ring-accent focus:border-accent bg-white h-12",
+      "otp": "w-14 h-16 text-2xl text-center border-2 border-border focus:border-primary focus:ring-2 focus:ring-accent rounded-none font-mono font-bold"
+    },
+    "badges": {
+      "pro": "bg-primary text-accent text-xs font-bold px-2 py-1 uppercase tracking-wider",
+      "blockchain": "bg-accent-pale text-primary border border-accent flex items-center gap-2 px-3 py-1 font-mono text-xs uppercase"
+    },
+    "role_pill_selector": "flex gap-2 flex-wrap border-b border-border pb-4 w-full justify-center",
+    "file_upload_zone": "border-2 border-dashed border-primary-mid/30 bg-background/50 p-12 flex flex-col items-center justify-center cursor-pointer hover:border-accent hover:bg-accent-pale transition-colors",
+    "kanban_card": "bg-white border border-border p-4 shadow-sm border-l-4 border-l-primary cursor-grab active:cursor-grabbing",
+    "real_time_indicators": "flex items-center gap-3 font-mono text-sm text-text-muted"
+  },
+  "animations": {
+    "hover": "transition-all duration-200 ease-out",
+    "kanban_drag": "scale-105 shadow-xl rotate-2",
+    "page_transition": "framer-motion: initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}",
+    "staggered_list": "framer-motion: variants={{ hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0 } }}"
+  },
+  "media_urls": {
+    "logo_concept": "hexagon with '4X' in white + 'STRUCT' below in gold (use lucide-react Hexagon combined with Typography)",
+    "hero_landing_bg": "https://images.unsplash.com/photo-1748956628042-b73331e0b479?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA3MDB8MHwxfHNlYXJjaHwzfHxzdHJ1Y3R1cmFsJTIwc3RlZWwlMjBjb25zdHJ1Y3Rpb258ZW58MHx8fHwxNzc3MDU0NTU2fDA&ixlib=rb-4.1.0&q=85",
+    "hero_landing_description": "Construction workers are on a building site with a crane.",
+    "auth_split_bg": "https://images.pexels.com/photos/4458205/pexels-photo-4458205.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "auth_split_description": "High-resolution close-up of an architectural floor plan showcasing design details.",
+    "abstract_bridge": "https://images.unsplash.com/photo-1764717360313-587a1805fe7e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA3MDB8MHwxfHNlYXJjaHwyfHxzdHJ1Y3R1cmFsJTIwc3RlZWwlMjBjb25zdHJ1Y3Rpb258ZW58MHx8fHwxNzc3MDU0NTU2fDA&ixlib=rb-4.1.0&q=85",
+    "abstract_bridge_description": "Abstract view of a steel bridge structure against blue sky",
+    "blueprint_texture": "https://images.unsplash.com/photo-1762146828422-50a8bd416d3c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHwxfHxhcmNoaXRlY3R1cmFsJTIwZHJhZnRpbmclMjBibHVlcHJpbnR8ZW58MHx8fHwxNzc3MDU0NTU2fDA&ixlib=rb-4.1.0&q=85"
+  },
+  "icon_system": "lucide-react (Industrial/Technical standard mapping: Hexagon for logo, HardHat for roles, LayoutDashboard for dashboard, GitMerge for Structural Clash Detector, CheckSquare for Spec Compliance, ShieldCheck for Safety, Fingerprint for Blockchain)",
+  "instructions_to_main_agent": [
+    "INSTALLATION: Add required fonts via Google Fonts in index.html or layout: <link href='https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap' rel='stylesheet'>",
+    "Ensure Tailwind config uses the specific hex values defined here.",
+    "Use framer-motion for smooth staggered appearances on the dashboard elements.",
+    "On the marketing page, use a heavy hero overlay with bg-primary/70 so the gold accent pops and text is visible.",
+    "All interactive elements (buttons, nav, cards) MUST have a unique data-testid attribute in kebab-case representing their role (e.g., data-testid='login-submit-btn').",
+    "Construct the 25 AI mode selector using an asymmetrical Bento grid (Grid Borders strategy) with 1px dark borders, ensuring the PRO badges are strictly Gold/Navy.",
+    "The 'Role pill selector' in the auth screen must be mapped exactly to: Detailer, Modular, Fabricator, Engineer, PM, Estimator.",
+    "Dashboard cards should have NO border radius (rounded-none) and 1px border. No soft shadows. Use sharp shadows or just border colors to signify states."
+  ]
+}

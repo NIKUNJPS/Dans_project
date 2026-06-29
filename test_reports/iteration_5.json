@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 5 backend validation of 32-mode catalog (16 detailer + 16 fabricator), prompt-router per-role isolation, and Super Admin permission editor integration. 11/11 pytest cases PASSED + 3 additional manual flow checks for /api/analyses routing. Catalog returns exactly 32 modes split 16/16 across exactly 8 canonical groups. Detailer estimation mode = ESTIMATION_PRO (label contains 'Hours-Based'). Fabricator estimation mode = FABRICATOR_ESTIMATION_PRO (label contains 'Tonnage'). All 15 shared prompts are byte-identical between roles (verified via get_mode_prompt + direct DETAILER_MODES vs FABRICATOR_MODES comparison). Locked detailer (allowedModes=[]) sees 0 modes / 0 groups. After enabling 3 modes (MASTER_INTAKE, ESTIMATION_PRO, MTO), detailer sees exactly those 3 across the 3 corresponding groups (Intake & Index, Estimation & Bid, Take-off). Cross-role permission save accepts FABRICATOR_ESTIMATION_PRO for a detailer (200) but /api/analyses/modes correctly filters it out (0 modes returned) — proper isolation at the role-catalog layer. Fabricator with MTO + FABRICATOR_ESTIMATION_PRO sees exactly those 2. POST /api/analyses with FABRICATOR_ESTIMATION_PRO for a fabricator queues successfully. POST /api/analyses with ESTIMATION_PRO for a detailer queues successfully. POST /api/analyses with cross-role FABRICATOR_ESTIMATION_PRO for a detailer queues 200 (permission_guard passes since super_admin allowed it) but the runner correctly fails with 'Mode FABRICATOR_ESTIMATION_PRO not available for role detailer' from get_mode_prompt — recorded as error_message on the analysis record, exactly matching the expected behavior in the spec. Super Admin sees all 32 modes via /api/analyses/modes. GET /api/admin/users/{uid}/permissions correctly returns persisted allowedModes after PUT updates.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_mode_catalog.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Cross-role permission save is intentionally permissive (returns 200 even for mismatched mode IDs). Isolation is enforced at /api/analyses/modes filtering and at runner-time via get_mode_prompt ValueError. This is acceptable per spec but a minor UX improvement would be to surface a warning in the Super Admin permission editor when assigning a cross-role mode ID (e.g. flag FABRICATOR_* on a detailer user).",
+    "prompt_router.get_mode_prompt for super_admin role iterates ROLE_MAP.values() and returns the first match — if a mode_id exists in both registries (currently only true for the 15 shared modes which are imported references so identity is guaranteed), the detailer's copy is returned first. Currently harmless because prompts are identical, but documenting this ordering would help future-proof the helper.",
+    "detailer_prompts.py is ~1500+ lines (all 16 prompts inline). Acceptable since they are large content strings, but consider splitting per-mode prompt files if any individual prompt grows further to keep diffs reviewable."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_mode_catalog.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "n/a (backend-only scope)"},
+  "test_credentials": "Super admin niks.shah236@gmail.com / Nikunj@1405 used. Test users created via /api/admin/users with first_name+last_name (NOT 'name') schema and cleaned up after run.",
+  "seed_data_creation": "Test users prefixed test_detailer_* and test_fab_* are auto-created and DELETEd by the pytest fixtures. No residual seed data.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 5 was prompts/mode-catalog only. The /api/admin/users endpoint requires first_name + last_name (not legacy 'name' field). PUT /api/admin/users/{id}/permissions accepts {allowedModes: [...]} as a partial update — other feature_permissions defaults are preserved. GET /api/analyses/modes returns {modes: [...], groups: [...]} where groups is a deduplicated ordered list. The runner persists ValueError from prompt_router as analysis.error_message with status='failed'.",
+  "rca of the issue": "n/a — no bugs found in iteration 5 scope."
+}

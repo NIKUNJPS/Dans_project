@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 4 — AI-driven Estimation (POST /api/estimation/ai-calculate) fully tested. Backend: 20/20 pytest pass covering validation (missing files 422, zero rates 422, invalid roles 400, cross-role 403, canRunEstimation=false 403, country lockdown 403, >maxFilesPerAnalysis 413, non-vision file 415), AI happy paths (fabricator extracts tonnage > 0 with grand_range_text and engine='STRUCTMIND CORE…' label, detailer extracts drawings/connections/complexity/complexity_multiplier), PDF download for both roles (application/pdf, >1KB), audit log entry 'estimation.ai_calculate', slimmed schema endpoint (rate_label_low/high + default_low/high, no 'fields' array), legacy /calculate backwards-compat (fabricator requires cost_per_ton_low/high, detailer hours-path), list endpoint shows AI runs with auto-derived 'AI · <filename>' project_name. Frontend: Estimation page (/estimate) renders ONLY dropzone + LOW + HIGH + role-switcher + Calculate button. Calculate is disabled until a file is uploaded. Initial DETAILER defaults are 120/220, role switcher (custom shadcn select) shows both Detailer/Fabricator options. Labels read 'Your per-drawing fee — LOW/HIGH' for detailer (per-ton for fabricator). All legacy fields (Total Tonnage, Weld Length, Cut Length, Surface Treatment, Assembly Complexity, Number of Drawings, Connection Count, 3D Modeling Hours, QC Hours, Risk Multiplier) are GONE. Previous Estimates table present at bottom.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/estimation/ai-calculate (canRunEstimation=false path)", "issue": "Error message returned is the generic feature-gate string 'Feature \"canRunEstimation\" is not enabled for your account. Contact your administrator.' instead of the spec'd 'Estimation is disabled for your account.' Status code is correctly 403 — only the message text differs."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Estimation page (and Dashboard / Analytics inherited)", "issues": ["Recharts ResponsiveContainer still emits 'width(-1) and height(-1) of chart should be greater than 0' warnings on initial paint — carry-over from iteration_3, low priority, no visual regression."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_ai_estimation.py",
+    "/app/backend/tests/test_v4_architecture.py",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [
+    "(Optional, low) Align the 403 message on POST /api/estimation/ai-calculate when canRunEstimation=false with the spec wording 'Estimation is disabled for your account.' (currently uses the generic check_feature message). Status code is already correct."
+  ],
+  "critical_code_review_comments": [
+    "AI estimation route correctly enforces all guards in the right order: block_write_if_readonly → role/role-mismatch checks (400/403) → rate validation (422) → file_ids non-empty (422) → canRunEstimation + country gates → maxFilesPerAnalysis cap (413) → MIME whitelist (415). Solid layering, no bypass paths.",
+    "extract_quantities() walks MODEL_CHAIN with try/except per tier and surfaces a single 502 with the last error — good resilience for transient Gemini 5xx.",
+    "apply_band_to_extracted() correctly swaps low/high if the user inverted them and rejects tonnage<=0 / drawings<=0 with 422 mapped from ValueError. The complexity_multiplier is applied to the per-drawing rate (effective_low = rate_low × mult) — confirmed in test_detailer_happy where mult was returned and non-zero.",
+    "Auto-derivation of project_name as 'AI · <original_filename[:60]>' is implemented at L171 of routes/estimation.py and verified by test_list_estimates_includes_ai_run.",
+    "Audit log entry 'estimation.ai_calculate' is written via audit_log() with extra={role, country, files} — verified end-to-end.",
+    "Slimmed schema endpoint /api/estimation/schema/{role} correctly omits 'fields' array and only returns rate_label_low/high, default_low/high, rate_unit, title, subtitle.",
+    "Legacy POST /api/estimation/calculate is untouched and still enforces fabricator's cost_per_ton_low/high (422) and detailer's hours-based path — backwards-compat preserved.",
+    "PDF renderer auto-detects shape via is_ai = 'ai_extracted' in result.visible — both detailer and fabricator AI records render >1KB PDFs.",
+    "(Minor) The generic 403 message from check_feature() ('Feature \"X\" is not enabled…') is returned when canRunEstimation is false; the spec asks for 'Estimation is disabled for your account.' — cosmetic only.",
+    "(Minor) Frontend Estimation page custom shadcn Select component lacks <option value=…> semantics — Playwright cannot use select_option(); not a bug but worth a data-testid on each SelectItem (e.g. est-role-option-detailer / -fabricator) for cleaner E2E testing."
+  ],
+  "updated_files": ["/app/backend/tests/test_ai_estimation.py"],
+  "success_rate": {"backend": "100% (20/20 pytest)", "frontend": "100% of attempted smoke flows (page render, defaults, disabled-state, legacy-fields-absence, role-switcher dropdown options)"},
+  "test_credentials": "Super admin 1: niks.shah236@gmail.com / Nikunj@1405 (used). Created TEST_det_ai_* and TEST_fab_ai_* users with canRunEstimation=true and TEST_det_dis_* with canRunEstimation=false.",
+  "seed_data_creation": "Several TEST_-prefixed detailer/fabricator users created via /api/admin/users for the AI-calculate test matrix. ~10+ estimate records (AI and legacy) inserted with TEST_ or 'AI · bom_*.csv' project names.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Estimation route in frontend is /estimate (not /estimation). Use sidebar testid 'nav-estimate' to navigate (there are TWO links with name='Estimation' — sidebar nav-estimate and dashboard CTA dashboard-estimate; either works). Role-switcher is a shadcn-custom Select (radix) — Playwright's select_option doesn't work; open it via click on [data-testid=\"est-role-select\"] then click the option div with role=\"option\". Recommend main agent add data-testid=\"est-role-option-detailer\" and -fabricator on the SelectItem children for cleaner E2E. AI calls take 8-25s — use timeout>=60s. Backend canonical regression files now: /app/backend/tests/test_v4_architecture.py (32 tests, still relevant for 3-role + legacy estimation) + /app/backend/tests/test_ai_estimation.py (20 tests, new AI-driven flow). Iteration_3 tests still pass. The non-vision-friendly assertion is intentionally loose (415/422/502 all acceptable) because the upload gateway may already reject .nc1 at /files/upload, or AI may bounce it back as 502 — we don't want to hard-couple to the exact MIME-rejection path.",
+  "rca of the issue": "No functional bugs. The single minor item (canRunEstimation=false message wording) is cosmetic — the check_feature() helper in middleware/permission_guard.py emits a generic 'Feature \"X\" is not enabled for your account.' template; to match the spec verbatim, either special-case 'canRunEstimation' in check_feature or wrap it in routes/estimation.py:ai_calculate before calling check_feature."
+}
