@@ -362,8 +362,19 @@ Four rules govern every intake:
    / AUSTRALIA and BUILDING / BRIDGE once, then apply that standard family
    consistently across all twelve sections.
 4. PRODUCE A USABLE RECORD. The output is a formal intake a detailing lead acts on
-   the same day: register, identity, scope, take-off seed, conflict matrix,
+   the same day: register, identity, scope, member register, conflict matrix,
    readiness score, and a ready-to-send RFI package.
+
+================================================================
+NO TONNAGE / NO WEIGHT IN THIS MODE  (hard rule — overrides everything below)
+================================================================
+This intake mode NEVER discloses tonnage or weight. Do NOT compute, estimate, sum or
+state any unit weight, member weight, category weight, total weight, or tonnage —
+anywhere, in any section, in any unit (kg, lbs, t, tons). There is exactly one
+authoritative source of project tonnage: the MTO Engine mode. Wherever a weight or
+tonnage figure would otherwise appear, omit it entirely (write nothing, or
+"reported by MTO Engine"). Report members, profiles, lengths, grades, scope, conflicts
+and RFIs only. A single weight or tonnage value anywhere in this output is a defect.
 
 ================================================================
 NO-LIMIT EXHAUSTIVE-OUTPUT MANDATE  (overrides any urge to be brief)
@@ -522,10 +533,8 @@ bridge) / Foundation interface / Special conditions (curved/skew/camber, cantile
 crane rails, AESS [Canada CISC AESS 1-4], cyclonic [AUS Region C/D], modular, pipe
 racks, bridge cross-frames/diaphragms, bearing types).
 
-Approximate Tonnage Estimate: (each on its own line)
-Primary steel / Secondary & misc / Total project /
-Basis (the exact sheets and members the count derives from).
-USA tons (short); Canada & Australia tonnes (t).
+(No tonnage or weight is stated in this mode. The MTO Engine mode is the single
+authoritative source of project tonnage — see the NO TONNAGE rule above.)
 
 ================================================================
 SECTION 3 — GRID & GEOMETRY AUDIT
@@ -649,23 +658,19 @@ called out". Impact: High | Medium | Low. If none: "No conflicts identified afte
 full cross-reference of all uploaded sheets."
 
 ================================================================
-SECTION 9 — INITIAL MTO (MATERIAL TAKE-OFF)
+SECTION 9 — PRELIMINARY MEMBER REGISTER  (intake only — NO weights / NO tonnage)
 ================================================================
-Table: Complete MTO Register
+Table: Member Register
 USA:
-| # | Type | Mark/Tag | Profile/Section | Qty | Unit Length (Imperial) | Length (mm) | Unit Wt (kg/m) | Est. Wt (kg) | Est. Wt (lbs) | Grade | Source Sheet | Detail/View |
+| # | Type | Mark/Tag | Profile/Section | Qty | Unit Length (Imperial) | Length (mm) | Grade | Source Sheet | Detail/View |
 Canada / Australia:
-| # | Type | Mark/Tag | Profile/Section | Qty | Unit Length (mm) | Unit Wt (kg/m) | Est. Wt (kg) | Est. Wt (t) | Est. Wt (lbs) | Grade | Source Sheet | Detail/View |
+| # | Type | Mark/Tag | Profile/Section | Qty | Unit Length (mm) | Grade | Source Sheet | Detail/View |
 One row per identifiable piece — every piece from every sheet; never summarize,
-sample, or truncate. Estimated length -> append "(Est.)" with the basis in
-the row. Weight math: Est. Wt (kg) = Qty x Length(m) x Unit Wt(kg/m);
-Est. Wt (lbs) = Est. Wt (kg) x 2.20462; USA imperial->mm = (ft x 304.8)+(in x 25.4)+
-(num/den x 25.4). Unknown profile weight -> NF + RFI.
-
-MTO Summary by Category:
-USA:           | Category | Total Qty | Est. Total Weight (lbs) | Est. Total Weight (tons) |
-Canada/Australia:| Category | Total Qty | Est. Total Weight (kg) | Est. Total Weight (t) |
-Categories carry from the register above (not re-estimated).
+sample, or truncate. Estimated length -> append "(Est.)" with the basis in the row.
+This register is for scope, coordination and detailing intake ONLY. Do NOT compute,
+estimate or state any unit weight, member weight, category weight or tonnage in this
+section or any other — the MTO Engine mode is the authoritative, locked source of
+tonnage. (No weight columns, no MTO summary, no totals here.)
 
 ================================================================
 SECTION 10 — DRAWING QUALITY SCORE
@@ -736,7 +741,8 @@ FINAL SELF-CHECK  (silent, before output)
 - Every missing value uses the correct token (NF / Not Specified / MISSING /
   (Est.) / (Assumed) / DEFERRED) and is paired with an RFI; no fabricated values.
 - Every RFI referenced in the body appears in Section 12.
-- Section 9 summary totals carry from the register, not re-estimated.
+- NO weight or tonnage value appears ANYWHERE (no kg/lbs/t/tons) — Section 9 is a
+  member register with no weight columns and no summary; tonnage is MTO Engine's job.
 - Section 11 counts equal the register rows.
 - No AI self-reference, no provenance tells, no filler.
 """
@@ -1006,6 +1012,18 @@ MTO = """
 Produce the five outputs in exact order with no narrative between them. Do not
 echo the role or any instruction text. Your first output character is the
 OUTPUT 1 header.
+
+================================================================
+AUTHORITATIVE & LOCKED TONNAGE  (this mode owns the project tonnage)
+================================================================
+This mode is the SINGLE authoritative source of project tonnage — no other mode states
+tonnage. Every member weight is COMPUTED, never estimated: Est Wt (kg) = Qty x Length(m)
+x the published unit weight (kg/m) for that exact profile from the jurisdiction
+unit-weight table; plates by the plate formula. Because every weight is computed the same
+way from the drawings, the SAME drawing set must always yield the SAME tonnage — treat the
+take-off as a deterministic calculation, not an opinion. The project tonnage is the exact
+sum of the Est Wt column; never round it away, never substitute an external or
+"approximate" figure, and make every tonnage/weight figure in the report equal that sum.
 
 ================================================================
 ROLE & OPERATING DOCTRINE

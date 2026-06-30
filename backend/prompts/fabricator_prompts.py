@@ -212,6 +212,17 @@ Read every uploaded file in full. Cross-reference all sheets.
 Never skip a section. Produce all 12 sections in the exact order below.
 
 ================================================================
+NO TONNAGE / NO WEIGHT IN THIS MODE  (hard rule — overrides everything below)
+================================================================
+This intake mode NEVER discloses tonnage or weight. Do NOT compute, estimate, sum or
+state any unit weight, member weight, category weight, total weight, or tonnage —
+anywhere, in any section, in any unit (kg, lbs, t, tons). There is exactly one
+authoritative source of project tonnage: the MTO Engine mode. Wherever a weight or
+tonnage figure would otherwise appear, omit it entirely (write nothing, or
+"reported by MTO Engine"). Report members, profiles, lengths, grades, scope, conflicts
+and RFIs only. A single weight or tonnage value anywhere in this output is a defect.
+
+================================================================
 NO-LIMIT EXHAUSTIVE-OUTPUT MANDATE  (overrides any urge to be brief)
 ================================================================
 This platform has NO output-length limit: long responses are automatically
@@ -289,12 +300,8 @@ Caption: Key project data extracted directly from drawing title blocks and gener
 - Foundation interface: [piers / mat / spread footings / not shown]
 - Special conditions: [transfer levels / cantilevers / crane rails / AESS / none]
 
-**Approximate Tonnage Estimate**
-
-- Primary structural steel: [X.XX] t
-- Secondary and miscellaneous steel: [X.XX] t
-- Combined project total: [X.XX] t
-- Basis: [describe source sheets and method used]
+(No tonnage or weight is stated in this mode. The MTO Engine mode is the single
+authoritative source of project tonnage — see the NO TONNAGE rule near the top.)
 
 ## 3. GRID AND GEOMETRY AUDIT
 ---
@@ -430,36 +437,21 @@ Conflict types: GRADE / FINISH / DIMENSION / BOLT / WELD / SCOPE / CODE / TOLERA
 Flag every conflict found — no filtering for severity.
 A minor on-paper conflict can become a major shop rework event.
 
-## 9. PRELIMINARY MATERIAL TAKE-OFF
+## 9. PRELIMINARY MEMBER REGISTER  (intake only — NO weights / NO tonnage)
 ---
-{_WEIGHT_TABLE}
 
-**Complete MTO Register**
+**Member Register**
 
-Caption: Member-by-member weight take-off with full calculation transparency.
+Caption: Member-by-member intake list for scope and coordination. No weights, no tonnage.
 
-| No. | Type | Mark | Profile | Qty | Length (Imperial) | Length (mm) | Unit Wt (kg/m) | Weight (kg) | Weight (lb) | Grade | Source Sheet | Extraction Method |
-| ---: | :--- | :--- | :--- | ---: | :--- | ---: | ---: | ---: | ---: | :--- | :---: | :---: |
+| No. | Type | Mark | Profile | Qty | Length (Imperial) | Length (mm) | Grade | Source Sheet | Extraction Method |
+| ---: | :--- | :--- | :--- | ---: | :--- | ---: | :--- | :---: | :---: |
 
-Calculation rules:
-  Length in mm = (ft x 304.8) + (in x 25.4) + (fraction x 25.4), round to whole mm
-  Weight kg = Qty x Length(m) x Unit Weight(kg/m)
-  Plates: Thickness(mm) x Width(mm) x Length(m) x 0.00785 = kg
+This register is for scope, coordination and fabrication intake ONLY. Do NOT compute,
+estimate or state any unit weight, member weight, category weight or tonnage in this
+section or any other — the MTO Engine mode is the authoritative, locked source of
+tonnage. No weight columns, no MTO summary, no totals here.
   Extraction method: BOM DIRECT / MEMBER SCHEDULE CALC / FRAMING PLAN ESTIMATE
-
-**MTO Summary by Category**
-
-Caption: Tonnage totals consolidated by member category.
-
-| Category | Count | Total Weight (lb) | Total Weight (kg) | Total Tons |
-| :--- | ---: | ---: | ---: | ---: |
-| W-Shapes | — | — | — | — |
-| HSS and Tube | — | — | — | — |
-| Pipe | — | — | — | — |
-| Angles and Channels | — | — | — | — |
-| Plates | — | — | — | — |
-| Miscellaneous and Anchors | — | — | — | — |
-| PROJECT TOTAL | — | — | — | — |
 
 ## 10. DRAWING PACKAGE ASSESSMENT
 ---
@@ -1411,6 +1403,18 @@ MTO = f"""
 Begin DIRECTLY at Output 1. Zero preamble. Zero role echo.
 {_GLOBAL_FORMAT_RULES}
 {_WEIGHT_TABLE}
+
+================================================================
+AUTHORITATIVE & LOCKED TONNAGE  (this mode owns the project tonnage)
+================================================================
+This mode is the SINGLE authoritative source of project tonnage — no other mode states
+tonnage. Every member weight is COMPUTED, never estimated: Weight(kg) = Qty x Length(m) x
+the published unit weight (kg/m) for that exact profile from the weight table above;
+plates by Thickness(mm) x Width(mm) x Length(m) x 0.00785. Because every weight is computed
+the same way from the drawings, the SAME drawing set must always yield the SAME tonnage —
+treat the take-off as a deterministic calculation, not an opinion. The project tonnage is
+the exact sum of the Weight column; never round it away, never substitute an external or
+"approximate" figure, and make every tonnage/weight figure in the report equal that sum.
 
 ================================================================
 NO-LIMIT EXHAUSTIVE-OUTPUT MANDATE  (overrides any urge to be brief)

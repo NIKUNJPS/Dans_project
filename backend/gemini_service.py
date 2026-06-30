@@ -296,7 +296,9 @@ def _generate(
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            temperature=0.1,
+            # temperature 0 = most deterministic decoding, so the same drawings yield the
+            # most consistent (near-constant) take-off + tonnage on repeat runs.
+            temperature=0.0,
             max_output_tokens=MAX_OUTPUT_TOKENS,
         ),
     )

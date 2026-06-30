@@ -102,38 +102,16 @@ async def _run_analysis_task(analysis_id: str):
         )
         requester_role = (requester or {}).get("role", "detailer")
 
-        # A rough single-pass tonnage estimate, used only as an advisory CROSS-CHECK.
-        # The mode's own detailed member-by-member take-off is the authoritative figure —
-        # we must never force the detailed take-off to defer to this rougher estimate, or
-        # the report ends up showing two conflicting tonnages.
-        tonnage_block = ""
-        if file_pairs and mode_id in {"MASTER_INTAKE", "MTO"}:
-            from estimation.tonnage import get_or_lock_tonnage
-            locked = await get_or_lock_tonnage(
-                analysis.get("file_ids") or [], file_pairs, analysis_id
-            )
-            if locked and locked.get("tonnage"):
-                tonnage_block = (
-                    "\n\n## TONNAGE CROSS-CHECK (advisory — NOT the headline figure)\n"
-                    f"An independent rough single-pass estimate put this project's fabricated "
-                    f"tonnage near {locked['tonnage']:.2f} t. Treat this STRICTLY as a sanity "
-                    f"cross-check. Your own detailed member-by-member take-off in THIS report is "
-                    f"the authoritative figure — compute and report the project tonnage from your "
-                    f"own take-off table, and make every tonnage and weight figure in the report "
-                    f"agree with that table. If your detailed total diverges from this cross-check "
-                    f"by more than ~10%, add ONE brief reconciliation note with the likely reason "
-                    f"(e.g. the rough estimate missed secondary/connection steel, or referenced "
-                    f"drawings were not uploaded). Never overwrite your computed take-off total "
-                    f"with this estimate, and never print two different headline tonnages."
-                )
-
+        # Tonnage is owned by ONE mode only — the MTO Engine — which computes it from its
+        # own detailed member-by-member take-off. We deliberately inject NO external
+        # tonnage figure: a second (rougher) estimate only ever conflicted with the MTO's
+        # detailed total. Master Intake discloses no tonnage at all (handled in its prompt).
         system_persona = get_system_prompt(requester_role)
         mode_prompt = get_mode_prompt(requester_role, mode_id)
         composed_system_prompt = (
             f"{system_persona.strip()}\n\n"
             f"## MODE: {meta['label']}\n{mode_prompt}\n\n"
             f"## GLOBAL FORMATTING\n{GLOBAL_FORMAT_RULES}"
-            f"{tonnage_block}"
         )
 
         user_text = analysis.get("input_text") or ""
