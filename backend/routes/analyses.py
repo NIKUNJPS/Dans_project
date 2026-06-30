@@ -5,6 +5,7 @@ for granular feature gating (mode access, monthly cap, export format, file size,
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -169,17 +170,9 @@ async def _run_analysis_task(analysis_id: str):
     issues = {"critical": crit, "major": major, "minor": minor, "total": crit + major + minor}
     quality = max(0, min(100, 100 - crit * 8 - major * 3 - minor * 1))
 
-    proj = await db.projects.find_one({"id": analysis.get("project_id")}) if analysis.get("project_id") else None
-    export_meta = {
-        "id": analysis_id,
-        "mode_label": meta["label"],
-        "project_name": proj["name"] if proj else "Quick Analysis",
-        "completed_at": _now_iso(),
-        "model_used": model_used,
-        "blockchain_hash": output_hash,
-    }
-    exports = generate_all_exports(output, export_meta)
-
+    # Persist the result and mark COMPLETE *first*. The report must never be lost and
+    # the UI must update the instant the analysis finishes — even if export rendering is
+    # slow or fails. Exports are generated afterwards as a best-effort step (below).
     await db.analyses.update_one(
         {"id": analysis_id},
         {
@@ -192,15 +185,7 @@ async def _run_analysis_task(analysis_id: str):
                 "issues_found": issues,
                 "quality_score": quality,
                 "blockchain_hash": output_hash,
-                "exports": [
-                    {
-                        "format": e["format"],
-                        "url": f"/api/analyses/{analysis_id}/export/{e['format']}",
-                        "generated_at": _now_iso(),
-                    }
-                    for e in exports
-                    if e.get("path")
-                ],
+                "exports": [],
                 "completed_at": _now_iso(),
             }
         },
@@ -223,6 +208,44 @@ async def _run_analysis_task(analysis_id: str):
     await db.users.update_one(
         {"id": user_id}, {"$inc": {"usage_this_month.analyses": 1}}
     )
+
+    # ── Best-effort exports — generated AFTER completion, off the event loop ──
+    # A failure or slowness here can never block completion or lose the report. The
+    # blocking renderers run in a worker thread so the single web process keeps serving
+    # requests (status polling, etc.) while PDFs/Word/Excel are built.
+    try:
+        proj = (
+            await db.projects.find_one({"id": analysis.get("project_id")})
+            if analysis.get("project_id")
+            else None
+        )
+        export_meta = {
+            "id": analysis_id,
+            "mode_label": meta["label"],
+            "project_name": proj["name"] if proj else "Quick Analysis",
+            "completed_at": _now_iso(),
+            "model_used": model_used,
+            "blockchain_hash": output_hash,
+        }
+        exports = await asyncio.to_thread(generate_all_exports, output, export_meta)
+        await db.analyses.update_one(
+            {"id": analysis_id},
+            {
+                "$set": {
+                    "exports": [
+                        {
+                            "format": e["format"],
+                            "url": f"/api/analyses/{analysis_id}/export/{e['format']}",
+                            "generated_at": _now_iso(),
+                        }
+                        for e in exports
+                        if e.get("path")
+                    ],
+                }
+            },
+        )
+    except Exception:  # noqa: BLE001 — exports are non-critical; the report is already saved
+        logger.exception("export_generation_failed analysis=%s", analysis_id)
 
 
 @router.get("/modes")

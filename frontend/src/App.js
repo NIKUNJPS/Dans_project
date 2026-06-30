@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
@@ -7,30 +8,58 @@ import {
 } from "@/components/auth/ProtectedRoute";
 import { AppShell } from "@/components/layout/AppShell";
 
+// Public, critical-path pages stay eager so first paint is instant.
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
-import Signup from "@/pages/Signup";
-import VerifyOtp from "@/pages/VerifyOtp";
-import ForgotPassword from "@/pages/ForgotPassword";
 
-import Dashboard from "@/pages/Dashboard";
-import Projects from "@/pages/Projects";
-import ProjectDetail from "@/pages/ProjectDetail";
-import AnalyzeWizard from "@/pages/AnalyzeWizard";
-import AnalysisReport from "@/pages/AnalysisReport";
-import RfiKanban from "@/pages/RfiKanban";
-import Outputs from "@/pages/Outputs";
-import RiskDashboard from "@/pages/RiskDashboard";
+// Everything else is code-split into its own chunk and loaded on demand. This keeps
+// heavy deps (recharts, framer-motion, admin views) out of the initial bundle, so the
+// app shell paints fast instead of waiting on the whole application to download.
+const Signup = lazy(() => import("@/pages/Signup"));
+const VerifyOtp = lazy(() => import("@/pages/VerifyOtp"));
+const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
 
-import { SettingsProfile, SettingsSecurity } from "@/pages/Settings";
+const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const Projects = lazy(() => import("@/pages/Projects"));
+const ProjectDetail = lazy(() => import("@/pages/ProjectDetail"));
+const AnalyzeWizard = lazy(() => import("@/pages/AnalyzeWizard"));
+const AnalysisReport = lazy(() => import("@/pages/AnalysisReport"));
+const RfiKanban = lazy(() => import("@/pages/RfiKanban"));
+const Outputs = lazy(() => import("@/pages/Outputs"));
+const RiskDashboard = lazy(() => import("@/pages/RiskDashboard"));
 
-import { AdminUsers } from "@/pages/admin/AdminUsers";
-import {
-    AdminPermissionsList,
-    AdminPermissionEditor,
-} from "@/pages/admin/AdminPermissions";
-import { AdminAuditLog } from "@/pages/admin/AdminAuditLog";
-import { AdminAnalytics } from "@/pages/admin/AdminAnalytics";
+const SettingsProfile = lazy(() =>
+    import("@/pages/Settings").then((m) => ({ default: m.SettingsProfile })),
+);
+const SettingsSecurity = lazy(() =>
+    import("@/pages/Settings").then((m) => ({ default: m.SettingsSecurity })),
+);
+
+const AdminUsers = lazy(() =>
+    import("@/pages/admin/AdminUsers").then((m) => ({ default: m.AdminUsers })),
+);
+const AdminPermissionsList = lazy(() =>
+    import("@/pages/admin/AdminPermissions").then((m) => ({ default: m.AdminPermissionsList })),
+);
+const AdminPermissionEditor = lazy(() =>
+    import("@/pages/admin/AdminPermissions").then((m) => ({ default: m.AdminPermissionEditor })),
+);
+const AdminAuditLog = lazy(() =>
+    import("@/pages/admin/AdminAuditLog").then((m) => ({ default: m.AdminAuditLog })),
+);
+const AdminAnalytics = lazy(() =>
+    import("@/pages/admin/AdminAnalytics").then((m) => ({ default: m.AdminAnalytics })),
+);
+
+function PageFallback() {
+    return (
+        <div className="flex min-h-screen items-center justify-center bg-background">
+            <div className="font-mono text-xs uppercase tracking-wider text-ink-muted">
+                Loading…
+            </div>
+        </div>
+    );
+}
 
 function AppRoute({ children }) {
     return (
@@ -74,6 +103,7 @@ export default function App() {
             />
 
             <BrowserRouter>
+                <Suspense fallback={<PageFallback />}>
                 <Routes>
                     {/* PUBLIC ROUTES */}
                     <Route path="/" element={<RootGate />} />
@@ -258,6 +288,7 @@ export default function App() {
                         element={<Navigate to="/" replace />}
                     />
                 </Routes>
+                </Suspense>
             </BrowserRouter>
         </AuthProvider>
     );

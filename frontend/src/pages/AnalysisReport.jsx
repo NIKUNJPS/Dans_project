@@ -8,7 +8,6 @@ import {
     RotateCw,
     Sparkles,
 } from "lucide-react";
-import { motion } from "framer-motion";
 import { api, errMessage } from "@/lib/api";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -422,13 +421,9 @@ export default function AnalysisReport() {
                         </aside>
                         <div className="lg:col-span-3 space-y-6">
                             {sections.map((s, i) => (
-                                <motion.section
+                                <section
                                     key={s.id}
                                     id={`sec-${s.id}`}
-                                    initial={{ opacity: 0, y: 12 }}
-                                    whileInView={{ opacity: 1, y: 0 }}
-                                    viewport={{ once: true }}
-                                    transition={{ duration: 0.45, delay: i * 0.05 }}
                                     className="card-steel p-6"
                                 >
                                     <div className="flex items-center justify-between border-b border-ink-line pb-3">
@@ -444,7 +439,7 @@ export default function AnalysisReport() {
                                     <div className="mt-4">
                                         <MarkdownBlock body={s.body} />
                                     </div>
-                                </motion.section>
+                                </section>
                             ))}
                         </div>
                     </div>
