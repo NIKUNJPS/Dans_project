@@ -102,9 +102,10 @@ async def _run_analysis_task(analysis_id: str):
         )
         requester_role = (requester or {}).get("role", "detailer")
 
-        # One authoritative tonnage per drawing-set, shared across Master Intake /
-        # MTO Engine / Estimation so all modes report the identical figure. Applied to
-        # the tonnage-bearing modes for BOTH roles (detailer + fabricator).
+        # A rough single-pass tonnage estimate, used only as an advisory CROSS-CHECK.
+        # The mode's own detailed member-by-member take-off is the authoritative figure —
+        # we must never force the detailed take-off to defer to this rougher estimate, or
+        # the report ends up showing two conflicting tonnages.
         tonnage_block = ""
         if file_pairs and mode_id in {"MASTER_INTAKE", "MTO"}:
             from estimation.tonnage import get_or_lock_tonnage
@@ -113,15 +114,17 @@ async def _run_analysis_task(analysis_id: str):
             )
             if locked and locked.get("tonnage"):
                 tonnage_block = (
-                    "\n\n## AUTHORITATIVE PROJECT TONNAGE\n"
-                    f"An independent verified member-by-member take-off computed the total "
-                    f"fabricated tonnage for this project as {locked['tonnage']:.2f} t. "
-                    f"This is the project's reference total — report this exact figure as the "
-                    f"project tonnage so every mode agrees. Your own detailed take-off must "
-                    f"reconcile to it; if your member-level sum differs by more than 2%, "
-                    f"recheck your take-off (missing or double-counted members) before "
-                    f"finalising, then state the reconciled total. Do not invent a different "
-                    f"headline tonnage."
+                    "\n\n## TONNAGE CROSS-CHECK (advisory — NOT the headline figure)\n"
+                    f"An independent rough single-pass estimate put this project's fabricated "
+                    f"tonnage near {locked['tonnage']:.2f} t. Treat this STRICTLY as a sanity "
+                    f"cross-check. Your own detailed member-by-member take-off in THIS report is "
+                    f"the authoritative figure — compute and report the project tonnage from your "
+                    f"own take-off table, and make every tonnage and weight figure in the report "
+                    f"agree with that table. If your detailed total diverges from this cross-check "
+                    f"by more than ~10%, add ONE brief reconciliation note with the likely reason "
+                    f"(e.g. the rough estimate missed secondary/connection steel, or referenced "
+                    f"drawings were not uploaded). Never overwrite your computed take-off total "
+                    f"with this estimate, and never print two different headline tonnages."
                 )
 
         system_persona = get_system_prompt(requester_role)
@@ -140,11 +143,17 @@ async def _run_analysis_task(analysis_id: str):
                 f"Follow every instruction in the mode prompt verbatim."
             )
 
+        # Estimation engines produce one locked, internally-consistent manifest
+        # (tonnage/hours → cost). They must NOT be split across batches and merged, or
+        # the headline figures would disagree. Run them in a single coherent pass.
+        single_pass = mode_id in {"ESTIMATION_PRO", "FABRICATOR_ESTIMATION_PRO"}
+
         output, model_used = await run_analysis(
             session_id=analysis_id,
             system_prompt=composed_system_prompt,
             user_text=user_text,
             file_paths=file_pairs,
+            single_pass=single_pass,
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("Analysis failed")

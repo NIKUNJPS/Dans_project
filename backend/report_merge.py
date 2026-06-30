@@ -250,6 +250,75 @@ def _recompute_summary(detail_header: List[str], detail_rows: List[List[str]]) -
     return _table_to_md(header, align, rows)
 
 
+_MARK_HINTS = ("mark/tag", "mark", "tag")
+_PROFILE_HINTS = ("profile/section", "profile", "size/section", "section")
+
+
+def _detail_totals(detail_header: List[str], detail_rows: List[List[str]]) -> dict | None:
+    """Compute the project weight totals + heaviest piece from the merged detail table.
+
+    These drive the narrative summary lines so they can never disagree with the table.
+    """
+    kg_i = _find_col(detail_header, _WT_KG_HINTS)
+    lb_i = _find_col(detail_header, _WT_LB_HINTS)
+    mark_i = _find_col(detail_header, _MARK_HINTS)
+    prof_i = _find_col(detail_header, _PROFILE_HINTS)
+    if kg_i < 0:
+        return None
+
+    total_kg = 0.0
+    total_lbs = 0.0
+    best_kg = -1.0
+    best_desc = None
+    for r in detail_rows:
+        kg = _to_float(r[kg_i]) if kg_i < len(r) else None
+        if kg:
+            total_kg += kg
+            if kg > best_kg:
+                best_kg = kg
+                mark = r[mark_i] if 0 <= mark_i < len(r) and r[mark_i] else "—"
+                prof = r[prof_i] if 0 <= prof_i < len(r) and r[prof_i] else "—"
+                lbs = _to_float(r[lb_i]) if (0 <= lb_i < len(r)) else None
+                lbs = lbs if lbs else kg * 2.20462
+                best_desc = f"{mark} | {prof} | {kg:,.1f} kg | {round(lbs):,} lbs"
+        if 0 <= lb_i < len(r):
+            v = _to_float(r[lb_i])
+            if v:
+                total_lbs += v
+    if not total_lbs and total_kg:
+        total_lbs = total_kg * 2.20462
+    return {"kg": total_kg, "lbs": total_lbs, "largest": best_desc}
+
+
+def _refresh_narrative_totals(txt: str, n: dict | None) -> str:
+    """Rewrite the model's narrative tonnage/weight lines to match the merged table.
+
+    Targets only the take-off's OWN total lines (computed/total tonnage, combined weight,
+    largest single item). Leaves the advisory cross-check line untouched.
+    """
+    if not n or not n.get("kg"):
+        return txt
+    t = n["kg"] / 1000.0
+    txt = re.sub(
+        r"(computed\s+mto\s+tonnage[^:\n=]*[:=]\s*)([\d.,]+)\s*t\b",
+        lambda m: f"{m.group(1)}{t:,.2f} t", txt, flags=re.I,
+    )
+    txt = re.sub(
+        r"((?:total\s+project|project)\s+tonnage[^:\n=]*[:=]\s*)([\d.,]+)\s*t\b",
+        lambda m: f"{m.group(1)}{t:,.2f} t", txt, flags=re.I,
+    )
+    txt = re.sub(
+        r"(combined\s+weight[^:\n=]*[:=]\s*)([\d.,]+)\s*kg\b",
+        lambda m: f"{m.group(1)}{n['kg']:,.1f} kg", txt, flags=re.I,
+    )
+    if n.get("largest"):
+        txt = re.sub(
+            r"(largest\s+single\s+item\s+by\s+weight[^:\n=]*[:=]\s*)(.*)",
+            lambda m: f"{m.group(1)}{n['largest']}", txt, flags=re.I,
+        )
+    return txt
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public entry point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -335,9 +404,11 @@ def _merge(outputs: List[str]) -> str:
             best = score
             detail_sig = sig
     recomputed_summary = None
+    narrative_totals = None
     if detail_sig is not None:
         d = fused[detail_sig]
         recomputed_summary = _recompute_summary(d["header"], d["rows"])
+        narrative_totals = _detail_totals(d["header"], d["rows"])
     merged_detail_count = len(fused[detail_sig]["rows"]) if detail_sig is not None else 0
 
     # ── 2. Section buckets keyed by heading text, in first-seen order ──
@@ -388,6 +459,9 @@ def _merge(outputs: List[str]) -> str:
                     txt = _TOTAL_PIECES_RE.sub(
                         lambda m: f"{m.group(1)}{merged_detail_count:,}", txt
                     )
+                # Rewrite the take-off's own tonnage/weight lines to match the merged
+                # table, so a per-batch narrative figure can never contradict it.
+                txt = _refresh_narrative_totals(txt, narrative_totals)
                 norm = re.sub(r"\s+", " ", txt.strip()).lower()
                 if not norm or norm in seen_prose:
                     continue

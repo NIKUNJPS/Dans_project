@@ -508,6 +508,7 @@ async def run_analysis(
     user_text: str,
     file_paths: Iterable[tuple[str, str]] = (),
     chunk_sections: bool = False,
+    single_pass: bool = False,
 ) -> tuple[str, str]:
     """
     Execute Gemini analysis with:
@@ -525,6 +526,11 @@ async def run_analysis(
     chunk_sections  : Set True for MASTER_INTAKE (12-section) prompts to split
                       the output into two sequential section-group calls,
                       guaranteeing all sections are generated.
+    single_pass     : Set True for modes whose output is one internally-consistent
+                      computation that must NOT be split + merged — e.g. the
+                      Estimation engines, whose locked manifest (tonnage/hours → cost)
+                      would be corrupted by cross-batch merging. All files are sent in
+                      ONE call so the figures are derived from the whole project at once.
 
     Returns
     -------
@@ -535,7 +541,9 @@ async def run_analysis(
 
     # Build file batches once — reused across model fallback attempts
     if file_paths_list:
-        batches = _build_batches(file_paths_list)
+        # single_pass keeps the entire drawing-set in one call (no split, no merge) so
+        # locked/derived totals stay internally consistent.
+        batches = [file_paths_list] if single_pass else _build_batches(file_paths_list)
     else:
         # Text-only: one empty batch (no file upload)
         batches = [[]]
