@@ -37,7 +37,7 @@ from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
 from config import settings
-from report_merge import merge_reports
+from report_merge import merge_reports, normalize_section_headings
 
 logger = logging.getLogger(__name__)
 
@@ -595,6 +595,10 @@ async def run_analysis(
                     "deterministic_merge_used model=%s session=%s batches=%d",
                     model_name, session_id, len(batches),
                 )
+
+            # Make every OUTPUT/SECTION a real, navigable heading (covers single- and
+            # multi-batch alike) so the full member take-off is never buried in body text.
+            final_output = normalize_section_headings(final_output)
 
             logger.info(
                 "run_analysis_complete model=%s session=%s file_batches=%d",

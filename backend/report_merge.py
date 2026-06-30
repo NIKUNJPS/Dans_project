@@ -290,33 +290,104 @@ def _detail_totals(detail_header: List[str], detail_rows: List[List[str]]) -> di
     return {"kg": total_kg, "lbs": total_lbs, "largest": best_desc}
 
 
-def _refresh_narrative_totals(txt: str, n: dict | None) -> str:
-    """Rewrite the model's narrative tonnage/weight lines to match the merged table.
+_TONNAGE_NOTE = (
+    "_Note: the totals above are summed directly from the take-off table. If any drawing "
+    "referenced on the sheets was not uploaded, this take-off is incomplete — upload the "
+    "full drawing set (beam schedules, base-plate plans, framing plans) for the complete "
+    "tonnage._"
+)
 
-    Targets only the take-off's OWN total lines (computed/total tonnage, combined weight,
-    largest single item). Leaves the advisory cross-check line untouched.
+# Phrases that mark a take-off TOTAL line whose number must equal the merged table.
+_TOTAL_LINE_HINTS = (
+    "project tonnage", "combined weight", "computed mto tonnage",
+    "total estimated weight", "total weight", "total fabricated tonnage",
+    "total project weight", "grand total",
+)
+
+
+def _refresh_narrative_totals(txt: str, n: dict | None) -> str:
+    """Rewrite the model's narrative total lines to match the merged take-off table.
+
+    Robust to the unit the model chose (short tons / lbs / kg / metric t) — it reads the
+    unit from each line and substitutes the matching computed figure. The model's
+    "tonnage discrepancy" note (which embeds the old per-batch number and would now read
+    backwards) is replaced with an accurate completeness note.
     """
     if not n or not n.get("kg"):
         return txt
-    t = n["kg"] / 1000.0
-    txt = re.sub(
-        r"(computed\s+mto\s+tonnage[^:\n=]*[:=]\s*)([\d.,]+)\s*t\b",
-        lambda m: f"{m.group(1)}{t:,.2f} t", txt, flags=re.I,
-    )
-    txt = re.sub(
-        r"((?:total\s+project|project)\s+tonnage[^:\n=]*[:=]\s*)([\d.,]+)\s*t\b",
-        lambda m: f"{m.group(1)}{t:,.2f} t", txt, flags=re.I,
-    )
-    txt = re.sub(
-        r"(combined\s+weight[^:\n=]*[:=]\s*)([\d.,]+)\s*kg\b",
-        lambda m: f"{m.group(1)}{n['kg']:,.1f} kg", txt, flags=re.I,
-    )
-    if n.get("largest"):
-        txt = re.sub(
-            r"(largest\s+single\s+item\s+by\s+weight[^:\n=]*[:=]\s*)(.*)",
-            lambda m: f"{m.group(1)}{n['largest']}", txt, flags=re.I,
+    kg = n["kg"]
+    lbs = n.get("lbs") or kg * 2.20462
+    t = kg / 1000.0
+    short = lbs / 2000.0
+    largest = n.get("largest")
+
+    def pick(unit_text: str) -> str:
+        u = unit_text.lower()
+        if "short ton" in u:
+            return f"{short:,.2f}"
+        if "lb" in u:
+            return f"{lbs:,.0f}"
+        if "kg" in u:
+            return f"{kg:,.1f}"
+        return f"{t:,.2f}"  # metric tonnes / "tonnage"
+
+    out: list[str] = []
+    note_done = False
+    for line in txt.splitlines():
+        low = line.lower()
+        if "largest single item by weight" in low and largest:
+            out.append(re.sub(
+                r"(largest\s+single\s+item\s+by\s+weight[^:\n]*:\s*).*",
+                lambda m: f"{m.group(1)}{largest}", line, flags=re.I,
+            ))
+        elif "discrepancy" in low or ("take-off total of" in low and "cross-check" in low):
+            # Premise no longer holds once the total is corrected — replace with a clean note.
+            if not note_done:
+                out.append(_TONNAGE_NOTE)
+                note_done = True
+        elif any(k in low for k in _TOTAL_LINE_HINTS):
+            out.append(re.sub(
+                r"(:\s*)([\d.,]+)", lambda m: f"{m.group(1)}{pick(low)}", line, count=1, flags=re.I,
+            ))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def normalize_section_headings(md: str) -> str:
+    """Promote 'OUTPUT N …' / 'SECTION N …' labels to markdown headings.
+
+    The model is inconsistent about heading markup, which leaves whole sections — most
+    importantly OUTPUT 2, the full member take-off with every beam and column — buried in
+    body text and missing from the report's navigation. This makes each part a real,
+    navigable heading. Consecutive duplicate headings are collapsed.
+    """
+    if not md:
+        return md
+    out: list[str] = []
+    last_heading = None
+    for line in md.splitlines():
+        s = line.strip()
+        core = s.strip("*").strip()
+        is_section = (
+            re.match(r"^(OUTPUT|SECTION|PART)\s+\d+\b", core, re.I)
+            and not s.startswith("#")
+            and not s.startswith("|")
         )
-    return txt
+        if is_section:
+            heading = "## " + core
+            norm = re.sub(r"\s+", " ", core.lower())
+            if norm == last_heading:
+                continue  # drop a duplicated label line
+            last_heading = norm
+            out.append(heading)
+        else:
+            if s.startswith("#"):
+                last_heading = re.sub(r"\s+", " ", s.lstrip("#").strip().lower())
+            elif s:
+                last_heading = None
+            out.append(line)
+    return "\n".join(out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

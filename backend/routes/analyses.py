@@ -459,8 +459,35 @@ async def download_export(
     if not ext:
         raise HTTPException(status_code=400, detail="Unsupported format")
     path = EXPORT_DIR / f"{aid}.{ext}"
+
+    # Generate on demand if the file is not on disk yet. Exports are produced as a
+    # best-effort step AFTER the report is saved, so a download can race ahead of them
+    # (or a prior generation may have failed). Regenerate from the stored report here so
+    # the user is never blocked by a missing export file.
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Export not generated yet")
+        if a.get("status") == "complete" and a.get("output_markdown"):
+            proj = (
+                await db.projects.find_one({"id": a.get("project_id")})
+                if a.get("project_id")
+                else None
+            )
+            export_meta = {
+                "id": aid,
+                "mode_label": a.get("mode_label", "Report"),
+                "project_name": proj["name"] if proj else a.get("project_name", "Quick Analysis"),
+                "completed_at": a.get("completed_at", ""),
+                "model_used": a.get("model_used", ""),
+                "blockchain_hash": a.get("blockchain_hash", ""),
+            }
+            try:
+                await asyncio.to_thread(generate_all_exports, a["output_markdown"], export_meta)
+            except Exception:  # noqa: BLE001
+                logger.exception("on_demand_export_failed analysis=%s fmt=%s", aid, fmt)
+        if not path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="Export could not be generated. The report may still be processing.",
+            )
     media = {
         "pdf": "application/pdf",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
