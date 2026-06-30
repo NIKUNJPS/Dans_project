@@ -414,6 +414,11 @@ def merge_reports(outputs: List[str]) -> str:
     outputs = [o for o in (outputs or []) if o and o.strip()]
     if not outputs:
         return ""
+    # Normalise headings on EACH batch BEFORE merging. The model emits section labels
+    # ("OUTPUT 2 …", "SECTION 3 …") as plain text, not markdown headings — so without
+    # this the section-aware merge can't recognise them and the sections repeat once per
+    # batch. Promoting them first lets the merge collapse them into ONE set.
+    outputs = [normalize_section_headings(o) for o in outputs]
     if len(outputs) == 1:
         return outputs[0]
 
