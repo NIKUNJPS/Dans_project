@@ -89,7 +89,29 @@ def _table_rows(tbl_md: str) -> list[list[str]]:
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         rows.append(cells)
-    return rows
+    return _normalize_rows(rows)
+
+
+def _normalize_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Force every row to the header's column count.
+
+    Word (python-docx) and PDF (reportlab) BOTH crash if a data row has a different number
+    of cells than the header — which happens whenever a cell contains an unescaped '|'
+    (e.g. pipe-separated Flag codes like "RECONCILE | VIF"). Short rows are padded; rows
+    with extra cells have the overflow merged back into the last column so no data is lost.
+    """
+    if not rows:
+        return rows
+    ncols = max(1, len(rows[0]))
+    fixed: list[list[str]] = []
+    for r in rows:
+        if len(r) == ncols:
+            fixed.append(r)
+        elif len(r) < ncols:
+            fixed.append(r + [""] * (ncols - len(r)))
+        else:
+            fixed.append(r[: ncols - 1] + [" | ".join(r[ncols - 1:])])
+    return fixed
 
 
 def _strip_md(text: str) -> str:

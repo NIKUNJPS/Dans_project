@@ -32,6 +32,8 @@ class Settings:
     otp_length: int = int(os.environ.get("OTP_LENGTH", "6"))
 
     # LLM
+    anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
+    # Legacy (kept so old env vars don't break config load; no longer used by the engine)
     emergent_llm_key: str = os.environ.get("EMERGENT_LLM_KEY", "")
     gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")
 

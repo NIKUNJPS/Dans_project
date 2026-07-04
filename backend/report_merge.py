@@ -305,52 +305,41 @@ _TOTAL_LINE_HINTS = (
 )
 
 
-def _refresh_narrative_totals(txt: str, n: dict | None) -> str:
-    """Rewrite the model's narrative total lines to match the merged take-off table.
+# Trailing summary lines the model writes AFTER the Output 3 category table (bullet
+# totals + any discrepancy note). The category table is the single authoritative summary,
+# so these are dropped from every report. Table rows (lines starting with "|") are kept.
+_FOOTER_DROP_RE = re.compile(
+    r"^(?:total\s+project\s+tonnage"
+    r"|misc\s*[/&and ]*\s*secondary\s+tonnage"
+    r"|secondary\s*[/&and ]*\s*misc\w*\s+tonnage"
+    r"|combined\s+weight"
+    r"|computed\s+mto\s+tonnage"
+    r"|total\s+(?:project\s+)?weight"
+    r"|total\s+(?:fabricated\s+)?tonnage"
+    r"|project\s+(?:total\s+)?tonnage"
+    r"|largest\s+single\s+item\s+by\s+weight"
+    r"|note\s+on\s+tonnage\s+discrepancy"
+    r"|tonnage\s+discrepancy)\b",
+    re.I,
+)
 
-    Robust to the unit the model chose (short tons / lbs / kg / metric t) — it reads the
-    unit from each line and substitutes the matching computed figure. The model's
-    "tonnage discrepancy" note (which embeds the old per-batch number and would now read
-    backwards) is replaced with an accurate completeness note.
+
+def strip_summary_footer(md: str) -> str:
+    """Remove the trailing tonnage-summary bullets (and any discrepancy note) the model
+    appends after the Output 3 category table. The category table IS the summary — nothing
+    follows it. Table rows (starting with '|') are never touched.
     """
-    if not n or not n.get("kg"):
-        return txt
-    kg = n["kg"]
-    lbs = n.get("lbs") or kg * 2.20462
-    t = kg / 1000.0
-    short = lbs / 2000.0
-    largest = n.get("largest")
-
-    def pick(unit_text: str) -> str:
-        u = unit_text.lower()
-        if "short ton" in u:
-            return f"{short:,.2f}"
-        if "lb" in u:
-            return f"{lbs:,.0f}"
-        if "kg" in u:
-            return f"{kg:,.1f}"
-        return f"{t:,.2f}"  # metric tonnes / "tonnage"
-
+    if not md:
+        return md
     out: list[str] = []
-    note_done = False
-    for line in txt.splitlines():
-        low = line.lower()
-        if "largest single item by weight" in low and largest:
-            out.append(re.sub(
-                r"(largest\s+single\s+item\s+by\s+weight[^:\n]*:\s*).*",
-                lambda m: f"{m.group(1)}{largest}", line, flags=re.I,
-            ))
-        elif "discrepancy" in low or ("take-off total of" in low and "cross-check" in low):
-            # Premise no longer holds once the total is corrected — replace with a clean note.
-            if not note_done:
-                out.append(_TONNAGE_NOTE)
-                note_done = True
-        elif any(k in low for k in _TOTAL_LINE_HINTS):
-            out.append(re.sub(
-                r"(:\s*)([\d.,]+)", lambda m: f"{m.group(1)}{pick(low)}", line, count=1, flags=re.I,
-            ))
-        else:
+    for line in md.splitlines():
+        core = line.strip().lstrip("-*•").strip()
+        if core.startswith("|"):
             out.append(line)
+            continue
+        if _FOOTER_DROP_RE.match(core):
+            continue  # drop this footer line
+        out.append(line)
     return "\n".join(out)
 
 
@@ -480,11 +469,9 @@ def _merge(outputs: List[str]) -> str:
             best = score
             detail_sig = sig
     recomputed_summary = None
-    narrative_totals = None
     if detail_sig is not None:
         d = fused[detail_sig]
         recomputed_summary = _recompute_summary(d["header"], d["rows"])
-        narrative_totals = _detail_totals(d["header"], d["rows"])
     merged_detail_count = len(fused[detail_sig]["rows"]) if detail_sig is not None else 0
 
     # ── 2. Section buckets keyed by heading text, in first-seen order ──
@@ -535,9 +522,6 @@ def _merge(outputs: List[str]) -> str:
                     txt = _TOTAL_PIECES_RE.sub(
                         lambda m: f"{m.group(1)}{merged_detail_count:,}", txt
                     )
-                # Rewrite the take-off's own tonnage/weight lines to match the merged
-                # table, so a per-batch narrative figure can never contradict it.
-                txt = _refresh_narrative_totals(txt, narrative_totals)
                 norm = re.sub(r"\s+", " ", txt.strip()).lower()
                 if not norm or norm in seen_prose:
                     continue

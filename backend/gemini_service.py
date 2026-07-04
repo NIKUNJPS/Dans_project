@@ -1,43 +1,39 @@
-"""
-LLM service — google.genai with service account authentication.
+"""LLM service — Anthropic Claude (Messages API + Files API).
 
-KEY FIXES vs previous version
-──────────────────────────────
-1.  max_output_tokens raised to 65 536 (Gemini 2.5 Pro/Flash support up to
-    65 536 output tokens).  This alone fixes the truncated 12-section intake.
-2.  finish_reason guard: if Gemini returns finish_reason == MAX_TOKENS the
-    response was cut.  We automatically continue with a CONTINUATION prompt
-    and stitch the pieces together until the model signals STOP.
-3.  Section-chunk mode (SECTION_GROUPS): for MASTER_INTAKE the prompt is split
-    into two logical halves (S1-S6, S7-S12) and run as two sequential calls
-    sharing the same uploaded files.  Results are stitched cleanly.
-4.  Uploaded files are kept alive across ALL model fallback attempts and ALL
-    section chunks; deleted only after the entire session succeeds or all
-    models fail.
-5.  Client is created ONCE per run_analysis call, not once per model tier.
-6.  Empty-batch guard: text-only requests skip the Files API entirely.
-7.  Async-safe: file upload/wait loop is offloaded to a thread pool so the
-    event loop is never blocked.
-8.  Structured logging with consistent field names throughout.
-"""
+Converted from Google Gemini to the Anthropic Claude API. The PUBLIC INTERFACE is
+unchanged (`run_analysis`, `MODEL_CHAIN`, `engine_label`, `_get_client`) so file
+batching, the deterministic merge, exports, and the estimation/tonnage paths keep
+working — only the model backend is swapped.
 
+WHY CLAUDE (Opus 4.8):
+  • Stronger, more literal structural-drawing reading and take-off accuracy.
+  • 1M input context + 128K max output → far fewer continuation stitches on big tables.
+  • Files API (up to 500 MB/file) handles the large drawing PDFs the base64 path can't.
+
+KEY BEHAVIOURS:
+  1. Files are uploaded to the Anthropic Files API and referenced by file_id; kept
+     alive across every continuation of a batch, deleted only after the batch finishes.
+  2. Adaptive thinking + effort=high for maximum extraction accuracy.
+  3. Prompt caching on the uploaded-file prefix so continuations don't re-bill the PDFs.
+  4. Continuation on stop_reason == "max_tokens": the model's own (thinking + text)
+     turn is echoed back verbatim and it is asked to continue — this ends on a USER
+     turn, so it is NOT an assistant prefill (which Opus 4.8 rejects).
+  5. Streaming is used for the large max_tokens so requests never hit HTTP timeouts.
+  6. Model fallback: Opus 4.8 → Sonnet 5 on any error or refusal.
+"""
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable
 
-import google.genai as genai
-from google.genai import types
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request
+import anthropic
 
 from config import settings
-from report_merge import merge_reports, normalize_section_headings
+from report_merge import merge_reports, normalize_section_headings, strip_summary_footer
 
 logger = logging.getLogger(__name__)
 
@@ -46,44 +42,38 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 MODEL_CHAIN: list[str] = [
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
+    "claude-opus-4-8",   # most capable — primary
+    "claude-sonnet-5",   # faster / cheaper fallback
 ]
 
 ENGINE_LABELS: dict[str, str] = {
-    "gemini-2.5-pro":   "STRUCTMIND CORE · PRO",
-    "gemini-2.5-flash": "STRUCTMIND CORE · FAST",
-    "gemini-2.0-flash": "STRUCTMIND CORE · LITE",
+    "claude-opus-4-8": "STRUCTMIND CORE · PRO",
+    "claude-sonnet-5": "STRUCTMIND CORE · FAST",
+    "claude-haiku-4-5": "STRUCTMIND CORE · LITE",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tunable limits
 # ─────────────────────────────────────────────────────────────────────────────
 
-MAX_BATCH_MB       = 90.0   # max total MB per Gemini Files API request
-MAX_FILES_PER_BATCH = 8     # files per upload batch (product spec: 8 per batch)
+MAX_BATCH_MB        = 90.0   # max total MB per upload batch (Files API allows 500MB/file)
+MAX_FILES_PER_BATCH = 8      # files per batch (product spec: 8 per batch)
 
-# Output token budget.
-# Gemini 2.5 Pro and Flash both support up to 65 536 output tokens.
-# We use 65 536 to allow a full 12-section MASTER_INTAKE in one shot.
-MAX_OUTPUT_TOKENS  = 65_536
+# Output token budget per call. Opus 4.8 / Sonnet 5 support up to 128K output; we use
+# 64K (streamed) — large enough that most take-offs finish in one or two calls, and
+# continuation stitches the rest. Adaptive thinking shares this budget with the answer.
+MAX_OUTPUT_TOKENS   = 64_000
 
-# If the model still hits the limit (finish_reason == MAX_TOKENS) we issue
-# continuation calls.  Each continuation re-uses the uploaded files, so a single
-# batch can stream a take-off of effectively unlimited length (e.g. 2 000+ rows)
-# by stitching ~65 k-token chunks until the model signals STOP.
-MAX_CONTINUATIONS  = 24     # safety cap — avoids infinite loops, not output length
+# Continuation cap — a single batch can stream an effectively unlimited take-off by
+# stitching ~64K-token chunks until the model stops. This is a safety cap, not a length.
+MAX_CONTINUATIONS   = 24
 
-# Section groups for MASTER_INTAKE chunking.
-# Each tuple is (group_label, section_numbers_string_for_prompt).
-# Only applied when the caller opts in via chunk_sections=True.
-SECTION_GROUPS: list[tuple[str, str]] = [
-    ("PART-A · Sections 1–6",  "SECTIONS 1, 2, 3, 4, 5, AND 6 ONLY"),
-    ("PART-B · Sections 7–12", "SECTIONS 7, 8, 9, 10, 11, AND 12 ONLY"),
-]
+# Beta header required to reference uploaded files by file_id.
+FILES_BETA = "files-api-2025-04-14"
 
-# Thread pool for blocking I/O (file upload, polling)
+# Thread pool for the blocking Anthropic calls (upload, streaming get_final_message).
 _EXECUTOR = ThreadPoolExecutor(max_workers=4)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -93,35 +83,41 @@ def engine_label(internal_model: str) -> str:
     return ENGINE_LABELS.get(internal_model, "STRUCTMIND CORE")
 
 
-def _get_credentials():
-    """Return fresh service-account credentials, or None."""
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not sa_json:
-        return None
-    try:
-        sa_info = json.loads(sa_json)
-        credentials = service_account.Credentials.from_service_account_info(
-            sa_info,
-            scopes=["https://www.googleapis.com/auth/generative-language"],
-        )
-        credentials.refresh(Request())
-        logger.info("service_account_credentials=refreshed")
-        return credentials
-    except Exception as exc:
-        logger.warning("service_account_auth_failed error=%s", exc)
-        return None
+def _get_client() -> anthropic.Anthropic:
+    """Return an authenticated Anthropic client.
+
+    Uses ANTHROPIC_API_KEY (from settings/env). The zero-arg constructor also reads the
+    env var, so this works whether or not the key is surfaced through settings.
+    """
+    if settings.anthropic_api_key:
+        return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return anthropic.Anthropic()
+    raise RuntimeError("ANTHROPIC_API_KEY is not configured")
 
 
-def _get_client() -> genai.Client:
-    """Return an authenticated Gemini client (created once per session)."""
-    credentials = _get_credentials()
-    if credentials:
-        logger.info("gemini_client=service_account")
-        return genai.Client(credentials=credentials)
-    if settings.llm_key:
-        logger.info("gemini_client=api_key")
-        return genai.Client(api_key=settings.llm_key)
-    raise RuntimeError("No Gemini credentials configured")
+def _text_of(message) -> str:
+    """Concatenate the visible text blocks of a Claude response (skips thinking blocks)."""
+    parts: list[str] = []
+    for block in getattr(message, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", "") or "")
+    return "".join(parts)
+
+
+def _ends_mid_table_row(text: str) -> bool:
+    """True if `text` ends in the MIDDLE of a markdown table row.
+
+    A complete row ends with '|'. If the last non-empty line opens a row ('|...') but
+    has no closing '|', the model was cut off mid-row and the continuation must be glued
+    on with no separator so the row is not split into two broken rows.
+    """
+    for line in reversed(text.splitlines()):
+        if not line.strip():
+            continue
+        ls = line.strip()
+        return ls.startswith("|") and not ls.endswith("|")
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,9 +127,8 @@ def _get_client() -> genai.Client:
 def _build_batches(
     file_paths: list[tuple[str, str]],
 ) -> list[list[tuple[str, str]]]:
-    """
-    Split file_paths into batches that each stay under MAX_BATCH_MB and
-    MAX_FILES_PER_BATCH.  Largest files first.
+    """Split file_paths into batches under MAX_BATCH_MB and MAX_FILES_PER_BATCH.
+    Largest files first.
     """
     sorted_files = sorted(
         file_paths,
@@ -174,19 +169,18 @@ def _build_batches(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# File upload — blocking, wrapped for async
+# File upload (Anthropic Files API) — blocking, wrapped for async
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _upload_files_sync(
-    client: genai.Client,
+    client: anthropic.Anthropic,
     file_paths: list[tuple[str, str]],
-) -> list:
+) -> list[tuple[str, str]]:
+    """Upload files to the Anthropic Files API (blocking).
+
+    Returns a list of (file_id, mime_type). Called via run_in_executor.
     """
-    Upload files to Gemini Files API (blocking).
-    Polls until ACTIVE or FAILED.  Returns list of active file objects.
-    Called via run_in_executor so the event loop stays free.
-    """
-    uploaded = []
+    uploaded: list[tuple[str, str]] = []
     for file_path, mime_type in file_paths:
         if not os.path.exists(file_path):
             logger.warning("upload_skip_missing path=%s", file_path)
@@ -195,141 +189,88 @@ def _upload_files_sync(
         logger.info("uploading path=%s size_mb=%.1f", file_path, size_mb)
         try:
             with open(file_path, "rb") as fh:
-                uploaded_file = client.files.upload(
-                    file=fh,
-                    config=types.UploadFileConfig(mime_type=mime_type),
+                info = client.beta.files.upload(
+                    file=(os.path.basename(file_path), fh, mime_type),
                 )
-
-            # Poll until ACTIVE
-            deadline = time.monotonic() + 120
-            while time.monotonic() < deadline:
-                info = client.files.get(name=uploaded_file.name)
-                state = info.state.name
-                if state == "ACTIVE":
-                    logger.info(
-                        "upload_ready name=%s size_mb=%.1f",
-                        uploaded_file.name, size_mb,
-                    )
-                    uploaded.append(info)
-                    break
-                if state == "FAILED":
-                    logger.error("upload_failed name=%s", uploaded_file.name)
-                    break
-                logger.debug("upload_state=%s name=%s", state, uploaded_file.name)
-                time.sleep(3)
-            else:
-                logger.warning("upload_timeout name=%s", uploaded_file.name)
-
-        except Exception as exc:
+            uploaded.append((info.id, mime_type))
+            logger.info("upload_ready id=%s size_mb=%.1f", info.id, size_mb)
+        except Exception as exc:  # noqa: BLE001
             logger.warning("upload_error path=%s error=%s", file_path, exc)
-
     return uploaded
 
 
 async def _upload_files(
-    client: genai.Client,
+    client: anthropic.Anthropic,
     file_paths: list[tuple[str, str]],
-) -> list:
-    """Async wrapper — runs blocking upload in thread pool."""
+) -> list[tuple[str, str]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _EXECUTOR, _upload_files_sync, client, file_paths
     )
 
 
-def _cleanup_files(client: genai.Client, uploaded_files: list) -> None:
-    """Delete uploaded files from Gemini Files API."""
-    for f in uploaded_files:
+def _cleanup_files(client: anthropic.Anthropic, uploaded: list[tuple[str, str]]) -> None:
+    for file_id, _mime in uploaded:
         try:
-            client.files.delete(name=f.name)
-            logger.info("file_deleted name=%s", f.name)
-        except Exception as exc:
-            logger.warning("file_delete_error name=%s error=%s", f.name, exc)
+            client.beta.files.delete(file_id)
+            logger.info("file_deleted id=%s", file_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("file_delete_error id=%s error=%s", file_id, exc)
+
+
+def _file_block(file_id: str, mime: str) -> dict:
+    """Build the content block that references an uploaded file by id."""
+    if (mime or "").startswith("image/"):
+        return {"type": "image", "source": {"type": "file", "file_id": file_id}}
+    # PDFs, text, csv → document blocks
+    return {"type": "document", "source": {"type": "file", "file_id": file_id}}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core generation — single call with continuation support
+# Core generation — streaming call with continuation support
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _is_truncated(response) -> bool:
-    """
-    Return True if Gemini stopped because it hit the output token limit.
-    The finish_reason field lives on the first candidate.
-    """
-    try:
-        reason = response.candidates[0].finish_reason
-        # FinishReason enum: STOP=1, MAX_TOKENS=2
-        # Accept both the enum value and its string name
-        return str(reason) in ("FinishReason.MAX_TOKENS", "MAX_TOKENS", "2")
-    except Exception:
-        return False
-
-
-def _ends_mid_table_row(text: str) -> bool:
-    """True if `text` ends in the MIDDLE of a markdown table row.
-
-    A complete row ends with '|'. If the last non-empty line opens a row ('|...')
-    but has no closing '|', the model was cut off mid-row and the continuation must
-    be glued on with no separator so the row is not split into two broken rows.
-    """
-    for line in reversed(text.splitlines()):
-        if not line.strip():
-            continue
-        ls = line.strip()
-        return ls.startswith("|") and not ls.endswith("|")
-    return False
-
-
-def _generate(
-    client: genai.Client,
+def _stream_once(
+    client: anthropic.Anthropic,
     model_name: str,
     system_prompt: str,
-    contents: list,
-) -> str:
+    messages: list,
+    has_files: bool,
+):
+    """Run one streamed Messages call and return the final Message. BLOCKING —
+    wrap in run_in_executor. Streaming keeps the connection alive for the large
+    max_tokens so we never hit an HTTP timeout.
     """
-    Run a single generate_content call and return the text.
-    Raises RuntimeError on empty or fully blocked response.
-    This is a BLOCKING call — wrap in run_in_executor for async callers.
-    """
-    response = client.models.generate_content(
+    kwargs = dict(
         model=model_name,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            # temperature 0 = most deterministic decoding, so the same drawings yield the
-            # most consistent (near-constant) take-off + tonnage on repeat runs.
-            temperature=0.0,
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-        ),
+        max_tokens=MAX_OUTPUT_TOKENS,
+        system=system_prompt,
+        thinking={"type": "adaptive"},          # accuracy — no temperature/top_p on Opus 4.8
+        output_config={"effort": "high"},
+        messages=messages,
     )
-    text = (response.text or "").strip()
-    if not text:
-        raise RuntimeError("Empty response from model")
-    return text, _is_truncated(response)
+    if has_files:
+        kwargs["betas"] = [FILES_BETA]
+    with client.beta.messages.stream(**kwargs) as stream:
+        return stream.get_final_message()
 
 
 async def _generate_with_continuation(
     *,
-    client: genai.Client,
+    client: anthropic.Anthropic,
     model_name: str,
     system_prompt: str,
-    initial_parts: list[types.Part],
+    initial_content: list,
+    has_files: bool,
     session_id: str,
     label: str = "",
 ) -> str:
-    """
-    Run generate_content.  If the model hits MAX_TOKENS, send a continuation
-    prompt and stitch the pieces together.  Repeats up to MAX_CONTINUATIONS.
-
-    Returns the full stitched text.
+    """Stream a response; if it stops at max_tokens, echo the model's own turn back
+    and ask it to continue, stitching the pieces until it signals a natural stop.
     """
     loop = asyncio.get_running_loop()
 
-    # Build initial message
-    contents: list[types.Content] = [
-        types.Content(role="user", parts=initial_parts)
-    ]
-
+    messages: list = [{"role": "user", "content": initial_content}]
     accumulated = ""
     mid_row = False  # did the LAST chunk stop in the middle of a table row?
 
@@ -338,14 +279,18 @@ async def _generate_with_continuation(
             "generate attempt=%d model=%s session=%s label=%s",
             attempt, model_name, session_id, label,
         )
-        text, truncated = await loop.run_in_executor(
-            _EXECUTOR, _generate, client, model_name, system_prompt, contents
+        message = await loop.run_in_executor(
+            _EXECUTOR, _stream_once, client, model_name, system_prompt, messages, has_files
         )
+        stop = getattr(message, "stop_reason", None)
+        text = _text_of(message)
 
-        # ── Smart stitch ─────────────────────────────────────────────────────
-        # Glue continuations so a take-off table split across chunks is never
-        # broken at the seam: mid-row resumes with no separator; otherwise a
-        # newline starts the next line cleanly.
+        if stop == "refusal":
+            raise RuntimeError("Model refused the request (safety)")
+        if not text and stop != "max_tokens":
+            raise RuntimeError("Empty response from model")
+
+        # ── Smart stitch ────────────────────────────────────────────────────────
         if not accumulated:
             accumulated = text
         elif mid_row:
@@ -353,16 +298,16 @@ async def _generate_with_continuation(
         else:
             accumulated += "\n" + text
 
-        if not truncated:
+        if stop != "max_tokens":
             logger.info(
-                "generate_complete attempt=%d model=%s session=%s label=%s",
-                attempt, model_name, session_id, label,
+                "generate_complete attempt=%d model=%s session=%s label=%s stop=%s",
+                attempt, model_name, session_id, label, stop,
             )
             break
 
         if attempt == MAX_CONTINUATIONS:
             logger.warning(
-                "max_continuations_reached model=%s session=%s label=%s rows_may_be_incomplete",
+                "max_continuations_reached model=%s session=%s label=%s",
                 model_name, session_id, label,
             )
             break
@@ -373,7 +318,7 @@ async def _generate_with_continuation(
             attempt, model_name, session_id, mid_row,
         )
         if mid_row:
-            continuation_instruction = (
+            cont = (
                 "Your previous response was cut off at the token limit while writing a "
                 "table row. Resume that SAME row from the exact character where you "
                 "stopped — output the remainder of the row first (no leading newline, "
@@ -382,17 +327,20 @@ async def _generate_with_continuation(
                 "summarise or skip rows; keep going until the final piece."
             )
         else:
-            continuation_instruction = (
+            cont = (
                 "Your previous response was cut off at the token limit. Continue EXACTLY "
                 "from where you stopped on a new line — do NOT restart, do NOT repeat any "
                 "heading, row or content already written, do NOT re-print table headers. "
                 "Complete every remaining row and section. Never summarise or skip rows; "
                 "keep going until the final piece."
             )
-        contents = [
-            types.Content(role="user",    parts=initial_parts),
-            types.Content(role="model",   parts=[types.Part(text=text)]),
-            types.Content(role="user",    parts=[types.Part(text=continuation_instruction)]),
+        # Echo the model's own turn back UNCHANGED (preserves thinking blocks, which
+        # Opus 4.8 requires on same-model continuation). This ends on a user turn, so
+        # it is a valid continuation, not a forbidden assistant prefill.
+        messages = [
+            {"role": "user", "content": initial_content},
+            {"role": "assistant", "content": message.content},
+            {"role": "user", "content": cont},
         ]
 
     return accumulated
@@ -404,7 +352,7 @@ async def _generate_with_continuation(
 
 async def _run_single_batch(
     *,
-    client: genai.Client,
+    client: anthropic.Anthropic,
     model_name: str,
     system_prompt: str,
     user_text: str,
@@ -412,38 +360,14 @@ async def _run_single_batch(
     batch_num: int,
     total_batches: int,
     session_id: str,
-    chunk_sections: bool = False,
 ) -> str:
-    """
-    Run one Gemini request for a single batch of files.
-
-    If chunk_sections=True the call is split into two sequential requests
-    (SECTION_GROUPS) sharing the same uploaded files.  This guarantees
-    all 12 sections are generated even if a single call would be too long.
-
-    Returns stitched markdown text.
-    """
-    # ── Upload files ────────────────────────────────────────────────────────
-    uploaded_files: list = []
+    """Upload one batch of files, run the take-off with continuation, clean up."""
+    uploaded: list[tuple[str, str]] = []
     if batch_files:
-        uploaded_files = await _upload_files(client, batch_files)
-        if not uploaded_files:
-            logger.warning(
-                "no_files_uploaded batch=%d session=%s", batch_num, session_id
-            )
+        uploaded = await _upload_files(client, batch_files)
+        if not uploaded:
+            logger.warning("no_files_uploaded batch=%d session=%s", batch_num, session_id)
 
-    # ── Build file parts (reused across section chunks) ──────────────────────
-    file_parts: list[types.Part] = [
-        types.Part(
-            file_data=types.FileData(
-                file_uri=f.uri,
-                mime_type=f.mime_type,
-            )
-        )
-        for f in uploaded_files
-    ]
-
-    # ── Annotate user text for multi-file-batch jobs ─────────────────────────
     base_user_text = user_text
     if total_batches > 1:
         base_user_text = (
@@ -452,51 +376,28 @@ async def _run_single_batch(
             f"Analyse only the files in this file batch thoroughly."
         )
 
+    # User content: the instruction text, then each file block. cache_control on the
+    # last block caches the (stable) file prefix so continuations don't re-bill the PDFs.
+    initial_content: list = [{"type": "text", "text": base_user_text}]
+    for file_id, mime in uploaded:
+        initial_content.append(_file_block(file_id, mime))
+    if initial_content:
+        last = initial_content[-1]
+        last["cache_control"] = {"type": "ephemeral"}
+
     try:
-        # ── Section-chunk mode: two calls, results stitched ───────────────────
-        if chunk_sections:
-            section_outputs: list[str] = []
-
-            for group_label, section_spec in SECTION_GROUPS:
-                chunk_instruction = (
-                    f"\n\nCRITICAL INSTRUCTION: Output {section_spec}. "
-                    f"Do NOT output any other sections. "
-                    f"Begin immediately with the first section in this group."
-                )
-                chunk_text = base_user_text + chunk_instruction
-                initial_parts = [types.Part(text=chunk_text)] + file_parts
-
-                logger.info(
-                    "section_chunk group=%s batch=%d/%d model=%s session=%s",
-                    group_label, batch_num, total_batches, model_name, session_id,
-                )
-                chunk_output = await _generate_with_continuation(
-                    client=client,
-                    model_name=model_name,
-                    system_prompt=system_prompt,
-                    initial_parts=initial_parts,
-                    session_id=session_id,
-                    label=f"{group_label} batch={batch_num}",
-                )
-                section_outputs.append(chunk_output)
-
-            return "\n\n".join(section_outputs)
-
-        # ── Single-call mode ──────────────────────────────────────────────────
-        initial_parts = [types.Part(text=base_user_text)] + file_parts
         return await _generate_with_continuation(
             client=client,
             model_name=model_name,
             system_prompt=system_prompt,
-            initial_parts=initial_parts,
+            initial_content=initial_content,
+            has_files=bool(uploaded),
             session_id=session_id,
             label=f"batch={batch_num}",
         )
-
     finally:
-        # Always clean up uploaded files
-        if uploaded_files:
-            _cleanup_files(client, uploaded_files)
+        if uploaded:
+            _cleanup_files(client, uploaded)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,60 +410,38 @@ async def run_analysis(
     system_prompt: str,
     user_text: str,
     file_paths: Iterable[tuple[str, str]] = (),
-    chunk_sections: bool = False,
+    chunk_sections: bool = False,   # kept for interface compatibility (unused with Claude)
     single_pass: bool = False,
 ) -> tuple[str, str]:
     """
-    Execute Gemini analysis with:
-      • File batching   — large file sets split into safe-sized batches
-      • Section chunking — optional two-pass mode for long outputs (MASTER_INTAKE)
-      • Continuation    — automatic continuation if output is truncated
-      • Model fallback  — falls through MODEL_CHAIN on any error
+    Execute a Claude analysis with:
+      • File batching   — large file sets split into 8-per-batch uploads
+      • Continuation    — automatic continuation if output hits max_tokens
+      • Deterministic merge — batches fused into ONE report, losslessly, with totals
+                          recomputed by summation (report_merge)
+      • Model fallback  — Opus 4.8 → Sonnet 5 on any error/refusal
 
-    Parameters
-    ----------
-    session_id      : Unique identifier for logging / tracing.
-    system_prompt   : System instruction string.
-    user_text       : User-facing task description.
-    file_paths      : Iterable of (local_path, mime_type) tuples.
-    chunk_sections  : Set True for MASTER_INTAKE (12-section) prompts to split
-                      the output into two sequential section-group calls,
-                      guaranteeing all sections are generated.
-    single_pass     : Set True for modes whose output is one internally-consistent
-                      computation that must NOT be split + merged — e.g. the
-                      Estimation engines, whose locked manifest (tonnage/hours → cost)
-                      would be corrupted by cross-batch merging. All files are sent in
-                      ONE call so the figures are derived from the whole project at once.
+    single_pass=True keeps the whole drawing set in ONE call (no split, no merge) so a
+    mode with locked/derived totals (the Estimation engines) stays internally consistent.
 
-    Returns
-    -------
-    (output_markdown, engine_display_label)
+    Returns (output_markdown, engine_display_label).
     """
     last_err: Exception | None = None
     file_paths_list = list(file_paths)
 
-    # Build file batches once — reused across model fallback attempts
     if file_paths_list:
-        # single_pass keeps the entire drawing-set in one call (no split, no merge) so
-        # locked/derived totals stay internally consistent.
         batches = [file_paths_list] if single_pass else _build_batches(file_paths_list)
     else:
-        # Text-only: one empty batch (no file upload)
         batches = [[]]
 
     logger.info(
-        "run_analysis_start session=%s total_files=%d total_file_batches=%d "
-        "chunk_sections=%s",
-        session_id, len(file_paths_list), len(batches), chunk_sections,
+        "run_analysis_start session=%s total_files=%d total_file_batches=%d single_pass=%s",
+        session_id, len(file_paths_list), len(batches), single_pass,
     )
 
-    # ── Model fallback loop ───────────────────────────────────────────────────
     for model_name in MODEL_CHAIN:
         try:
-            logger.info(
-                "model_attempt model=%s session=%s", model_name, session_id
-            )
-            # One client per run_analysis call
+            logger.info("model_attempt model=%s session=%s", model_name, session_id)
             client = _get_client()
             batch_outputs: list[str] = []
 
@@ -580,27 +459,22 @@ async def run_analysis(
                     batch_num=i,
                     total_batches=len(batches),
                     session_id=session_id,
-                    chunk_sections=chunk_sections,
                 )
                 batch_outputs.append(output)
 
             if len(batch_outputs) == 1:
                 final_output = batch_outputs[0]
             else:
-                # Multiple file batches — fuse into a SINGLE coherent report with a
-                # deterministic, table-aware merge. Unlike an LLM consolidation pass
-                # (which must re-emit every row and therefore truncates and drops rows
-                # on large take-offs), this preserves EVERY row from EVERY batch and
-                # recomputes project totals by summation. The client never sees a batch.
+                # Fuse batches into ONE report with the deterministic, lossless merge.
                 final_output = merge_reports(batch_outputs)
                 logger.info(
                     "deterministic_merge_used model=%s session=%s batches=%d",
                     model_name, session_id, len(batches),
                 )
 
-            # Make every OUTPUT/SECTION a real, navigable heading (covers single- and
-            # multi-batch alike) so the full member take-off is never buried in body text.
+            # Navigable headings + strip the trailing tonnage-summary footer.
             final_output = normalize_section_headings(final_output)
+            final_output = strip_summary_footer(final_output)
 
             logger.info(
                 "run_analysis_complete model=%s session=%s file_batches=%d",
@@ -608,7 +482,7 @@ async def run_analysis(
             )
             return final_output, engine_label(model_name)
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             last_err = exc
             logger.warning(
                 "model_failed model=%s session=%s error=%s",
@@ -617,6 +491,5 @@ async def run_analysis(
             continue
 
     raise RuntimeError(
-        f"All STRUCTMIND CORE tiers failed for session={session_id}. "
-        f"Last error: {last_err}"
+        f"All STRUCTMIND CORE tiers failed for session={session_id}. Last error: {last_err}"
     )

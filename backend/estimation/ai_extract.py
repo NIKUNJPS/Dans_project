@@ -14,7 +14,15 @@ import re
 from typing import Iterable
 
 from config import settings
-from gemini_service import MODEL_CHAIN, engine_label, _get_client
+from gemini_service import (
+    MODEL_CHAIN,
+    FILES_BETA,
+    engine_label,
+    _get_client,
+    _upload_files_sync,
+    _file_block,
+    _cleanup_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,66 +166,49 @@ No extra text.
 """
 
     last_err: Exception | None = None
-    client = _get_client()  # service-account or API-key aware; created on demand
+    client = _get_client()  # Anthropic client (ANTHROPIC_API_KEY aware)
+    file_pairs = list(file_paths)
 
-    for model_name in MODEL_CHAIN:
+    # Upload the drawings once to the Files API; reuse across model-fallback attempts.
+    uploaded = _upload_files_sync(client, file_pairs)
+    try:
+        for model_name in MODEL_CHAIN:
+            try:
+                logger.info(
+                    "AI estimate extraction · tier=%s · session=%s",
+                    model_name,
+                    session_id,
+                )
 
-        try:
-            logger.info(
-                "AI estimate extraction · tier=%s · session=%s",
-                model_name,
-                session_id,
-            )
+                content: list = [{"type": "text", "text": user_prompt}]
+                for file_id, mime in uploaded:
+                    content.append(_file_block(file_id, mime))
 
-            uploaded_files = []
+                response = client.beta.messages.create(
+                    model=model_name,
+                    max_tokens=8000,
+                    system=system_prompt,
+                    thinking={"type": "adaptive"},
+                    messages=[{"role": "user", "content": content}],
+                    betas=[FILES_BETA] if uploaded else [],
+                )
 
-            # Upload files to Gemini
-            for file_path, mime_type in file_paths:
+                response_text = "".join(
+                    getattr(b, "text", "")
+                    for b in (response.content or [])
+                    if getattr(b, "type", None) == "text"
+                ).strip()
 
-                try:
-                    uploaded_file = client.files.upload(
-                        file=file_path,
-                    )
+                data = _extract_json(response_text)
+                return data, engine_label(model_name)
 
-                    uploaded_files.append(uploaded_file)
-
-                except Exception as file_error:
-                    logger.warning(
-                        "File upload failed for %s: %s",
-                        file_path,
-                        file_error,
-                    )
-
-            # Build content
-            contents = [
-                system_prompt,
-                user_prompt,
-            ]
-
-            contents.extend(uploaded_files)
-
-            # Generate response
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-            )
-
-            response_text = response.text.strip()
-
-            data = _extract_json(response_text)
-
-            return data, engine_label(model_name)
-
-        except Exception as e:
-            last_err = e
-
-            logger.warning(
-                "AI extract tier %s failed: %s",
-                model_name,
-                e,
-            )
-
-            continue
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                logger.warning("AI extract tier %s failed: %s", model_name, e)
+                continue
+    finally:
+        if uploaded:
+            _cleanup_files(client, uploaded)
 
     raise RuntimeError(
         f"STRUCTMIND CORE could not extract quantities. Last error: {last_err}"

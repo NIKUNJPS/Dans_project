@@ -88,13 +88,9 @@ async def _run_analysis_task(analysis_id: str):
                 file_pairs.append((str(path), mt))
 
     try:
-        # Support both service account (GOOGLE_SERVICE_ACCOUNT_JSON) and API key (llm_key)
-        has_service_account = bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON"))
-        has_api_key = bool(settings.llm_key)
-        if not has_service_account and not has_api_key:
+        if not (settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")):
             raise RuntimeError(
-                "No LLM credentials configured. "
-                "Set GOOGLE_SERVICE_ACCOUNT_JSON or GEMINI_API_KEY in environment."
+                "No LLM credentials configured. Set ANTHROPIC_API_KEY in the environment."
             )
 
         requester = await db.users.find_one(
