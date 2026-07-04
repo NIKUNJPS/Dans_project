@@ -42,13 +42,15 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 MODEL_CHAIN: list[str] = [
-    "claude-opus-4-8",   # most capable — primary
-    "claude-sonnet-5",   # faster / cheaper fallback
+    "claude-sonnet-5",   # primary — near-Opus accuracy for MTO at ~40-50% lower cost
+    "claude-opus-4-8",   # fallback — most capable, used only if the primary errors
 ]
 
+# Client-facing labels. Sonnet is the production engine, so it carries the "PRO"
+# badge; Opus (the pricier fallback) shows "ULTRA". No report ever downgrades to "FAST".
 ENGINE_LABELS: dict[str, str] = {
-    "claude-opus-4-8": "STRUCTMIND CORE · PRO",
-    "claude-sonnet-5": "STRUCTMIND CORE · FAST",
+    "claude-sonnet-5": "STRUCTMIND CORE · PRO",
+    "claude-opus-4-8": "STRUCTMIND CORE · ULTRA",
     "claude-haiku-4-5": "STRUCTMIND CORE · LITE",
 }
 
