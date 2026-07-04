@@ -22,8 +22,15 @@ from security import block_write_if_readonly, get_current_user, sha256_hex
 router = APIRouter(prefix="/api/files", tags=["files"])
 
 ALLOWED_EXT = {
-    ".pdf", ".dwg", ".dxf", ".ifc", ".rvt", ".nwd", ".nc1", ".dstv",
-    ".xlsx", ".xls", ".csv", ".doc", ".docx", ".txt", ".png", ".jpg", ".jpeg",
+    # Drawings / documents (read directly)
+    ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+    # Office (auto-converted: Excel→CSV, Word→text)
+    ".xlsx", ".xlsm", ".xls", ".csv", ".doc", ".docx", ".txt",
+    # CAD / BIM (accepted; binary ones prompt "export to PDF")
+    ".dwg", ".dxf", ".ifc", ".rvt", ".nwd",
+    # Fabrication / interchange / text-based (read as text)
+    ".nc1", ".nc", ".dstv", ".mis", ".sdnf", ".kss", ".xml", ".json",
+    ".stp", ".step", ".md", ".log",
 }
 CHUNK = 1024 * 1024  # 1 MB
 

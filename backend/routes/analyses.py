@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ from fastapi.responses import FileResponse
 from config import settings
 from db import get_db
 from export_service import EXPORT_DIR, generate_all_exports
+from file_prep import prepare_file
 from gemini_service import run_analysis
 from middleware.permission_guard import (
     audit_log,
@@ -68,29 +71,39 @@ async def _run_analysis_task(analysis_id: str):
         {"id": analysis_id}, {"$set": {"status": "processing", "stage": "analyzing"}}
     )
 
-    # Collect files
+    # Prepare the files for the model: pass PDFs/images/text straight through, and
+    # CONVERT Excel→CSV, Word→text, and text-based engineering files (NC1/DSTV/…) so a
+    # much wider range of uploads "just works". Converted copies live in a scratch dir
+    # that is cleaned up after the run. Only proprietary binaries (DWG/DXF/RVT/…) are
+    # skipped — with a precise "export to PDF" message rather than a silent empty run.
+    scratch_dir = Path(tempfile.mkdtemp(prefix=f"prep_{analysis_id[:12]}_"))
     file_docs = []
     if analysis.get("file_ids"):
         file_docs = await db.files.find({"id": {"$in": analysis["file_ids"]}}).to_list(1000)
     file_pairs: list[tuple[str, str]] = []
+    skipped_files: list[str] = []
     for f in file_docs:
-        path = Path(settings.upload_dir) / f["storage_key"]
-        if path.exists() and f.get("mime_type"):
-            mt = f["mime_type"]
-            if mt in {
-                "application/pdf",
-                "text/plain",
-                "text/csv",
-                "image/png",
-                "image/jpeg",
-                "image/webp",
-            }:
-                file_pairs.append((str(path), mt))
+        pair, status = prepare_file(f, Path(settings.upload_dir), scratch_dir)
+        if pair:
+            file_pairs.append(pair)
+        else:
+            skipped_files.append(f.get("original_name") or f.get("storage_key") or "unknown file")
 
     try:
         if not (settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")):
             raise RuntimeError(
                 "No LLM credentials configured. Set ANTHROPIC_API_KEY in the environment."
+            )
+
+        # Files were uploaded but none are machine-readable — fail loudly with a precise
+        # fix rather than letting the model answer "no files were attached".
+        if file_docs and not file_pairs:
+            raise RuntimeError(
+                "None of the uploaded files could be read ("
+                + ", ".join(skipped_files)
+                + "). PDF, images, Excel, Word and text/fabrication files are supported, "
+                "but proprietary binary CAD/BIM (.dwg/.dxf/.rvt/.nwd/.ifc) must be exported "
+                "to PDF (or PNG/JPG) first — please upload that."
             )
 
         requester = await db.users.find_one(
@@ -115,6 +128,12 @@ async def _run_analysis_task(analysis_id: str):
             user_text = (
                 f"Run the {meta['label']} mode on the attached drawings / inputs. "
                 f"Follow every instruction in the mode prompt verbatim."
+            )
+        if skipped_files:
+            user_text += (
+                "\n\nNOTE: these uploaded files are proprietary binary CAD/BIM and were "
+                "excluded — export them to PDF to include them: "
+                + ", ".join(skipped_files) + "."
             )
 
         # Estimation engines produce one locked, internally-consistent manifest
@@ -142,6 +161,9 @@ async def _run_analysis_task(analysis_id: str):
             },
         )
         return
+    finally:
+        # Converted copies are uploaded inside run_analysis; drop the scratch dir now.
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
     elapsed = round(time.time() - started, 2)
     output_hash = sha256_hex(output)
