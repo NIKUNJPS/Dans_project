@@ -1,13 +1,15 @@
 """FastAPI entry point — 3-role architecture (super_admin · detailer · fabricator)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
+from cleanup import sweep_unused
 from config import settings
-from db import ensure_indexes, get_client
+from db import ensure_indexes, get_client, get_db
 from routes.admin import router as admin_router
 from routes.analyses import router as analyses_router
 from routes.auth import router as auth_router
@@ -65,13 +67,52 @@ async def health():
     return {"status": "ok"}
 
 
+_sweep_task: asyncio.Task | None = None
+
+
+async def _auto_sweep_loop():
+    """Periodically archive/hard-delete unused projects + orphaned files.
+
+    Runs quietly in the background; every failure is logged but never crashes the loop.
+    Controlled by the AUTO_SWEEP_* env vars (see config.py)."""
+    interval = max(1, settings.auto_sweep_interval_hours) * 3600
+    # Small initial delay so startup (indexes, seeding) finishes first.
+    await asyncio.sleep(60)
+    while True:
+        try:
+            report = await sweep_unused(
+                get_db(),
+                settings.upload_dir,
+                grace_hours=settings.auto_sweep_grace_hours,
+                hard=settings.auto_sweep_hard,
+                dry_run=False,
+            )
+            logger.info(
+                "auto_sweep_done projects=%d orphan_files=%d",
+                report["projects_swept"], report["orphan_files_removed"],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("auto_sweep_failed")
+        await asyncio.sleep(interval)
+
+
 @app.on_event("startup")
 async def on_startup():
     await ensure_indexes()
     await seed_admin()
+    global _sweep_task
+    if settings.auto_sweep_enabled:
+        _sweep_task = asyncio.create_task(_auto_sweep_loop())
+        logger.info(
+            "auto_sweep_enabled grace_hours=%d interval_hours=%d hard=%s",
+            settings.auto_sweep_grace_hours, settings.auto_sweep_interval_hours, settings.auto_sweep_hard,
+        )
     logger.info("STRUCTMIND backend ready · v4.0.0 · 3-role architecture")
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global _sweep_task
+    if _sweep_task:
+        _sweep_task.cancel()
     get_client().close()

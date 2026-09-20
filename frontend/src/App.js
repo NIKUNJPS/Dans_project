@@ -24,6 +24,7 @@ const Projects = lazy(() => import("@/pages/Projects"));
 const ProjectDetail = lazy(() => import("@/pages/ProjectDetail"));
 const AnalyzeWizard = lazy(() => import("@/pages/AnalyzeWizard"));
 const AnalysisReport = lazy(() => import("@/pages/AnalysisReport"));
+const Estimation = lazy(() => import("@/pages/Estimation"));
 const RfiKanban = lazy(() => import("@/pages/RfiKanban"));
 const Outputs = lazy(() => import("@/pages/Outputs"));
 const RiskDashboard = lazy(() => import("@/pages/RiskDashboard"));
@@ -157,6 +158,15 @@ export default function App() {
                         element={
                             <AppRoute>
                                 <AnalyzeWizard />
+                            </AppRoute>
+                        }
+                    />
+
+                    <Route
+                        path="/estimate"
+                        element={
+                            <AppRoute>
+                                <Estimation />
                             </AppRoute>
                         }
                     />

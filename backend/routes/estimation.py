@@ -156,7 +156,8 @@ async def ai_calculate(
     try:
         if role == "fabricator":
             lock = await get_or_lock_tonnage(
-                [f["id"] for f in file_docs], file_pairs, session_id
+                [f["id"] for f in file_docs], file_pairs, session_id,
+                country_code=country,
             )
             if not lock:
                 raise HTTPException(
@@ -167,6 +168,7 @@ async def ai_calculate(
         else:
             extracted, engine = await extract_quantities(
                 role=role, session_id=session_id, file_paths=file_pairs,
+                country_code=country,
             )
     except HTTPException:
         raise

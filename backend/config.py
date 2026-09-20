@@ -59,6 +59,13 @@ class Settings:
     upload_dir: str = os.environ.get("UPLOAD_DIR", "/app/backend/uploads")
     max_upload_mb: int = int(os.environ.get("MAX_UPLOAD_MB", "500"))
 
+    # Auto-sweep of unused/empty projects + orphaned files (background maintenance)
+    auto_sweep_enabled: bool = os.environ.get("AUTO_SWEEP_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+    auto_sweep_grace_hours: int = int(os.environ.get("AUTO_SWEEP_GRACE_HOURS", "72"))
+    auto_sweep_interval_hours: int = int(os.environ.get("AUTO_SWEEP_INTERVAL_HOURS", "12"))
+    # When true the sweep permanently deletes; when false (default, safe) it archives.
+    auto_sweep_hard: bool = os.environ.get("AUTO_SWEEP_HARD", "false").lower() in ("1", "true", "yes", "on")
+
     @property
     def llm_key(self) -> str:
         return self.gemini_api_key or self.emergent_llm_key

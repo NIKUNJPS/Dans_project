@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from cleanup import hard_delete_project, sweep_unused
+from config import settings
 from db import get_db
+from middleware.permission_guard import audit_log
 from models import ProjectCreate, ProjectUpdate
-from security import get_current_user, sha256_hex
+from security import block_write_if_readonly, get_current_user, get_super_admin, sha256_hex
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -99,15 +102,58 @@ async def update_project(pid: str, data: ProjectUpdate, user=Depends(get_current
 
 
 @router.delete("/{pid}")
-async def delete_project(pid: str, user=Depends(get_current_user)):
+async def delete_project(
+    pid: str,
+    request: Request,
+    hard: bool = Query(False, description="Permanently remove the project and all its files/analyses/estimates."),
+    user=Depends(get_current_user),
+):
+    """Archive a project (default), or permanently remove it with ?hard=true.
+
+    A hard delete removes the project plus its uploaded files (disk + DB), analyses,
+    RFIs, estimates referencing its files, and cached tonnage locks — it cannot be undone.
+    """
+    block_write_if_readonly(user)
     db = get_db()
     p = await db.projects.find_one({"id": pid})
     if not p:
         raise HTTPException(status_code=404, detail="Project not found")
     if user["role"] != "super_admin" and p["owner_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Only owner can delete")
+
+    if hard:
+        report = await hard_delete_project(db, pid, settings.upload_dir)
+        await audit_log(user["id"], "project.hard_delete", "project", pid, request, extra=report)
+        return {"message": "Project permanently deleted", "removed": report}
+
     await db.projects.update_one({"id": pid}, {"$set": {"status": "archived", "updated_at": _now()}})
+    await audit_log(user["id"], "project.archive", "project", pid, request)
     return {"message": "Project archived"}
+
+
+@router.post("/maintenance/sweep")
+async def run_sweep(
+    request: Request,
+    grace_hours: int = Query(72, ge=0, description="Only touch records older than this many hours."),
+    hard: bool = Query(False, description="Hard-delete unused projects instead of archiving them."),
+    dry_run: bool = Query(False, description="Report what would be removed without changing anything."),
+    user=Depends(get_super_admin),
+):
+    """Super-admin: sweep unused/empty projects and orphaned files.
+
+    Use ?dry_run=true first to preview. The startup background loop calls the same
+    routine on a schedule (see AUTO_SWEEP_* env vars)."""
+    db = get_db()
+    report = await sweep_unused(
+        db, settings.upload_dir, grace_hours=grace_hours, hard=hard, dry_run=dry_run,
+    )
+    if not dry_run:
+        await audit_log(user["id"], "project.sweep", "maintenance", "sweep", request, extra={
+            "projects_swept": report["projects_swept"],
+            "orphan_files_removed": report["orphan_files_removed"],
+            "hard": hard,
+        })
+    return report
 
 
 @router.post("/{pid}/team")

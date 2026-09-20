@@ -1,0 +1,252 @@
+"""Canonical structural-steel unit-weight tables + deterministic weight math.
+
+This module is the SINGLE source of truth the estimation engine uses to *recompute*
+member weights in Python — so the take-off tonnage is a deterministic calculation
+(the same drawing set always yields the same number) rather than an LLM guess.
+
+Weights are kg per metre. Plates/bars use the volumetric formula (density 7 850 kg/m³).
+Three jurisdictions are covered: USA (AISC), Canada (CISC), Australia (AS/NZS).
+
+A profile designation is normalised (upper-cased, spaces stripped) before lookup, so
+"w12x26", "W12X26" and "W12 x 26" all resolve to the same row.
+"""
+from __future__ import annotations
+
+import re
+
+STEEL_DENSITY_KG_M3 = 7850.0
+KG_TO_LB = 2.20462
+FT_TO_M = 0.3048
+IN_TO_MM = 25.4
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Raw tables — "DESIGNATION=kg/m" tokens, parsed once at import.
+# Keep the text form: it is both the machine table AND what we inject into the
+# extraction prompt so the model uses the exact same figures we verify against.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_USA_TABLE = """
+W-SHAPES:
+W6x9=13.4 W6x12=17.9 W6x15=22.3 W6x20=29.8 W6x25=37.2
+W8x10=14.9 W8x13=19.3 W8x15=22.3 W8x18=26.8 W8x21=31.2 W8x24=35.7 W8x28=41.7
+W8x31=46.1 W8x35=52.1 W8x40=59.5 W8x48=71.4 W8x58=86.3 W8x67=99.7
+W10x12=17.9 W10x15=22.3 W10x17=25.3 W10x19=28.3 W10x22=32.7 W10x26=38.7
+W10x30=44.6 W10x33=49.1 W10x39=58.0 W10x45=67.0 W10x49=72.9 W10x54=80.4
+W10x60=89.3 W10x68=101.2 W10x77=114.6 W10x88=130.9 W10x100=148.8 W10x112=166.7
+W12x14=20.8 W12x16=23.8 W12x19=28.3 W12x22=32.7 W12x26=38.7 W12x30=44.6
+W12x35=52.1 W12x40=59.5 W12x45=67.0 W12x50=74.4 W12x53=78.9 W12x58=86.3
+W12x65=96.8 W12x72=107.1 W12x79=117.6 W12x87=129.4 W12x96=142.9 W12x106=157.7
+W12x120=178.6 W12x136=202.4 W12x152=226.2 W12x170=253.0 W12x190=282.7 W12x210=312.5
+W14x22=32.7 W14x26=38.7 W14x30=44.6 W14x34=50.6 W14x38=56.6 W14x43=64.0
+W14x48=71.4 W14x53=78.9 W14x61=90.8 W14x68=101.2 W14x74=110.1 W14x82=122.0
+W14x90=133.9 W14x99=147.3 W14x109=162.2 W14x120=178.6 W14x132=196.5 W14x145=215.8
+W14x159=236.6 W14x176=261.9 W14x193=287.2 W14x211=313.9 W14x233=346.7 W14x257=382.4
+W14x283=421.1 W14x311=462.7 W14x342=508.9 W14x370=550.6 W14x398=592.3 W14x426=633.9
+W16x26=38.7 W16x31=46.1 W16x36=53.6 W16x40=59.5 W16x45=67.0 W16x50=74.4
+W16x57=84.8 W16x67=99.7 W16x77=114.6 W16x89=132.4 W16x100=148.8
+W18x35=52.1 W18x40=59.5 W18x46=68.5 W18x50=74.4 W18x55=81.9 W18x60=89.3
+W18x65=96.8 W18x71=105.7 W18x76=113.1 W18x86=127.9 W18x97=144.3 W18x106=157.7
+W18x119=177.1 W18x130=193.5 W18x143=212.9 W18x158=235.1
+W21x44=65.5 W21x50=74.4 W21x55=81.9 W21x62=92.3 W21x68=101.2 W21x73=108.6
+W21x83=123.5 W21x93=138.4 W21x101=150.3 W21x111=165.2 W21x122=181.5 W21x132=196.5
+W21x147=218.8 W21x166=247.0 W21x182=270.8 W21x201=299.1
+W24x55=81.9 W24x62=92.3 W24x68=101.2 W24x76=113.1 W24x84=125.0 W24x94=139.9
+W24x104=154.8 W24x117=174.1 W24x131=194.9 W24x146=217.3 W24x162=241.1 W24x176=261.9
+W24x192=285.7 W24x207=308.0 W24x229=340.9 W24x250=372.0 W24x279=415.2 W24x306=455.4
+W27x84=125.0 W27x94=139.9 W27x102=151.8 W27x114=169.7 W27x129=192.0 W27x146=217.3
+W27x161=239.6 W27x178=264.9 W27x194=288.7 W27x217=323.0 W27x235=349.7 W27x258=384.0
+W30x90=133.9 W30x99=147.3 W30x108=160.7 W30x116=172.6 W30x124=184.5 W30x132=196.5
+W30x148=220.3 W30x173=257.5 W30x191=284.3 W30x211=314.0 W30x235=349.7 W30x261=388.5
+W33x118=175.6 W33x130=193.5 W33x141=209.9 W33x152=226.2 W33x169=251.5 W33x201=299.1
+W33x221=328.9 W33x241=358.6 W33x263=391.4 W33x291=433.0 W33x318=473.2
+W36x135=200.9 W36x150=223.3 W36x160=238.1 W36x170=252.9 W36x182=270.8 W36x194=288.7
+W36x210=312.5 W36x232=345.2 W36x256=381.0 W36x232=345.2 W36x262=389.9 W36x282=419.7
+W36x300=446.5 W36x330=491.1 W36x361=537.2 W36x395=587.8 W36x441=656.3
+W40x149=221.8 W40x183=272.3 W40x211=314.0 W40x235=349.7 W40x264=392.9 W40x278=413.7
+W40x294=437.5 W40x327=486.6 W40x392=583.4 W40x431=641.4
+W44x230=342.3 W44x262=389.9 W44x290=431.5 W44x335=498.5
+WT-SHAPES:
+WT5x6=8.9 WT5x11=16.4 WT6x8=11.9 WT6x13=19.3 WT6x20=29.8 WT7x11=16.4
+WT7x15=22.3 WT7x24=35.7 WT8x13=19.3 WT8x25=37.2 WT9x20=29.8 WT9x30=44.6
+MISC-M-S:
+M10x9=13.4 M12x10=14.9 S8x18.4=27.4 S10x25.4=37.8 S12x31.8=47.3 S12x35=52.1
+HSS-SQUARE:
+HSS3x3x1/4=10.8 HSS3x3x3/8=15.3 HSS3.5x3.5x1/4=12.8 HSS4x4x3/16=11.3 HSS4x4x1/4=14.8
+HSS4x4x3/8=21.2 HSS4x4x1/2=27.2 HSS5x5x3/16=14.3 HSS5x5x1/4=18.8 HSS5x5x3/8=27.2
+HSS5x5x1/2=35.1 HSS6x6x3/16=17.3 HSS6x6x1/4=22.8 HSS6x6x3/8=33.1 HSS6x6x1/2=42.9
+HSS6x6x5/8=51.9 HSS7x7x1/4=26.8 HSS7x7x3/8=39.0 HSS7x7x1/2=50.9 HSS8x8x1/4=30.8
+HSS8x8x3/8=44.9 HSS8x8x1/2=58.5 HSS8x8x5/8=72.0 HSS8x8x3/4=84.4 HSS10x10x3/8=56.7
+HSS10x10x1/2=74.3 HSS10x10x5/8=91.5 HSS10x10x3/4=108.0 HSS12x12x3/8=68.6 HSS12x12x1/2=90.1
+HSS12x12x5/8=111.4 HSS12x12x3/4=132.0 HSS14x14x1/2=106.0 HSS16x16x1/2=121.8
+HSS-RECT:
+HSS4x2x1/4=11.5 HSS4x3x1/4=13.2 HSS5x3x1/4=14.8 HSS6x2x1/4=14.8 HSS6x3x1/4=16.4
+HSS6x4x1/4=18.0 HSS6x4x3/8=25.7 HSS6x4x1/2=32.5 HSS8x4x1/4=21.3 HSS8x4x3/8=30.5
+HSS8x6x3/8=37.0 HSS8x6x1/2=48.2 HSS10x4x3/8=40.3 HSS10x6x3/8=43.5 HSS10x6x1/2=57.3
+HSS12x4x1/2=57.8 HSS12x6x1/2=64.8 HSS12x8x1/2=74.3 HSS14x6x1/2=72.0 HSS16x8x1/2=90.1
+HSS20x12x1/2=121.8
+PIPE:
+PIPE2STD=3.7 PIPE2.5STD=5.4 PIPE3STD=5.9 PIPE3.5STD=7.6 PIPE4STD=9.6 PIPE5STD=12.4
+PIPE6STD=15.6 PIPE8STD=23.4 PIPE10STD=33.6 PIPE12STD=44.6 PIPE4XH=13.9 PIPE6XH=23.1
+PIPE8XH=33.3 PIPE10XH=48.3 PIPE12XH=59.6
+ANGLES:
+L2x2x1/4=3.7 L2x2x3/8=5.3 L2.5x2.5x1/4=4.7 L3x3x1/4=5.8 L3x3x3/8=8.5 L3x3x1/2=11.1
+L4x4x1/4=7.9 L4x4x3/8=11.5 L4x4x1/2=15.0 L4x4x5/8=18.5 L5x5x3/8=14.6 L5x5x1/2=19.2
+L5x5x5/8=23.7 L6x6x3/8=17.6 L6x6x1/2=23.2 L6x6x5/8=28.6 L6x6x3/4=34.0 L8x8x1/2=31.5
+L8x8x3/4=46.7 L8x8x1=61.5 L3x2x1/4=4.8 L4x3x1/4=6.8 L4x3x3/8=10.0 L5x3x5/16=10.1
+L5x3.5x3/8=11.9 L6x4x3/8=14.7 L6x4x1/2=19.3 L8x6x1/2=27.4 L8x6x3/4=40.3
+CHANNELS:
+C3x4.1=6.1 C4x5.4=8.0 C5x6.7=10.0 C6x8.2=12.2 C7x9.8=14.6 C8x11.5=17.1
+C9x13.4=19.9 C10x15.3=22.8 C10x20=29.8 C12x20.7=30.8 C12x30=44.6 C15x33.9=50.5
+C15x50=74.4 MC6x12=17.9 MC8x18.7=27.8 MC8x22.8=33.9 MC10x25=37.2 MC10x28.5=42.4
+MC12x31=46.1 MC12x45=67.0 MC18x42.7=63.5 MC18x58=86.3
+"""
+
+_CANADA_TABLE = """
+W-SHAPES:
+W150x13.5=13.5 W150x18=18 W150x22.5=22.5 W150x24=24 W150x30=30 W150x37.1=37.1
+W200x15=15 W200x19=19 W200x22=22 W200x27=27 W200x31=31 W200x36=36 W200x42=42
+W200x46=46 W200x52=52 W200x59=59 W200x71=71 W200x86=86 W200x100=100
+W250x18=18 W250x22=22 W250x25=25 W250x28=28 W250x33=33 W250x39=39 W250x45=45
+W250x49=49 W250x58=58 W250x67=67 W250x73=73 W250x80=80 W250x89=89 W250x101=101
+W250x115=115 W250x131=131 W250x149=149 W250x167=167
+W310x21=21 W310x24=24 W310x28=28 W310x33=33 W310x39=39 W310x45=45 W310x52=52
+W310x60=60 W310x67=67 W310x74=74 W310x79=79 W310x86=86 W310x97=97 W310x107=107
+W310x118=118 W310x129=129 W310x143=143 W310x158=158 W310x179=179 W310x202=202
+W360x33=33 W360x39=39 W360x44=44 W360x51=51 W360x57=57 W360x64=64 W360x72=72
+W360x79=79 W360x91=91 W360x101=101 W360x110=110 W360x122=122 W360x134=134
+W360x147=147 W360x162=162 W360x179=179 W360x196=196 W360x216=216 W360x237=237
+W410x39=39 W410x46=46 W410x53=53 W410x60=60 W410x67=67 W410x74=74 W410x85=85
+W410x100=100 W410x114=114 W410x132=132 W410x149=149
+W460x52=52 W460x60=60 W460x68=68 W460x74=74 W460x82=82 W460x89=89 W460x97=97
+W460x106=106 W460x113=113 W460x128=128 W460x144=144 W460x158=158 W460x177=177
+W530x66=66 W530x72=72 W530x74=74 W530x82=82 W530x85=85 W530x92=92 W530x101=101
+W530x109=109 W530x123=123 W530x138=138 W530x150=150 W530x165=165 W530x182=182
+W610x82=82 W610x91=91 W610x101=101 W610x113=113 W610x125=125 W610x140=140
+W610x153=153 W610x155=155 W610x174=174 W610x195=195 W610x217=217 W610x241=241
+W690x125=125 W690x140=140 W690x152=152 W690x170=170 W690x192=192 W690x217=217
+W760x134=134 W760x147=147 W760x161=161 W760x173=173 W760x185=185 W760x196=196
+HSS-SQUARE:
+HSS76x76x4.8=10.3 HSS89x89x6.4=15.6 HSS102x102x6.4=18.2 HSS102x102x9.5=25.9
+HSS127x127x6.4=23.2 HSS127x127x9.5=33.7 HSS152x152x6.4=28.1 HSS152x152x9.5=41.3
+HSS152x152x13=53.4 HSS178x178x9.5=48.7 HSS203x203x9.5=56.1 HSS203x203x13=73.0
+HSS254x254x9.5=71.0 HSS305x305x13=112.0
+HSS-RECT:
+HSS102x76x6.4=15.3 HSS127x76x6.4=18.2 HSS152x102x6.4=23.2 HSS203x102x6.4=28.1
+HSS203x152x9.5=48.7 HSS254x152x9.5=56.1
+ANGLES:
+L51x51x6.4=4.5 L76x76x6.4=7.2 L76x76x9.5=10.6 L102x102x9.5=14.6 L102x102x13=19.0
+L127x127x9.5=18.3 L152x152x13=29.8 L152x152x19=43.1
+CHANNELS:
+C100x8=8 C150x12=12 C150x19=19 C200x17=17 C200x28=28 C250x23=23 C250x37=37
+C310x31=31 C310x45=45 C380x50=50 C380x60=60
+"""
+
+_AUSTRALIA_TABLE = """
+UB-UNIVERSAL-BEAM:
+150UB14=14.0 150UB18=18.0 180UB16.1=16.1 180UB18.1=18.1 180UB22.2=22.2
+200UB18.2=18.2 200UB22.3=22.3 200UB25.4=25.4 200UB29.8=29.8 250UB25.7=25.7
+250UB31.4=31.4 250UB37.3=37.3 310UB32=32.0 310UB40.4=40.4 310UB46.2=46.2
+360UB44.7=44.7 360UB50.7=50.7 360UB56.7=56.7 410UB53.7=53.7 410UB59.7=59.7
+460UB67.1=67.1 460UB74.6=74.6 460UB82.1=82.1 530UB82=82.0 530UB92.4=92.4
+610UB101=101.0 610UB113=113.0 610UB125=125.0
+UC-UNIVERSAL-COLUMN:
+100UC14.8=14.8 150UC23.4=23.4 150UC30=30.0 150UC37.2=37.2 200UC46.2=46.2
+200UC52.2=52.2 200UC59.5=59.5 250UC72.9=72.9 250UC89.5=89.5 310UC96.8=96.8
+310UC118=118.0 310UC137=137.0 310UC158=158.0
+PFC-CHANNEL:
+75PFC=5.92 100PFC=8.33 125PFC=11.9 150PFC=17.7 180PFC=20.9 200PFC=22.9
+230PFC=25.1 250PFC=35.5 300PFC=40.1 380PFC=55.2
+EA-EQUAL-ANGLE:
+EA50x50x5=3.71 EA65x65x6=5.93 EA75x75x6=6.85 EA75x75x8=8.97 EA90x90x8=10.9
+EA100x100x8=12.2 EA100x100x10=15.0 EA125x125x10=19.0 EA150x150x12=27.3 EA150x150x16=35.7
+UA-UNEQUAL-ANGLE:
+UA75x50x6=5.66 UA100x75x8=10.6 UA125x75x10=14.9 UA150x90x12=21.6
+RHS-RECT-HOLLOW:
+RHS75x50x4=6.60 RHS100x50x5=10.6 RHS125x75x5=14.5 RHS150x100x6=21.4
+RHS200x100x6=26.4 RHS250x150x9=52.4
+SHS-SQUARE-HOLLOW:
+SHS50x50x4=5.42 SHS65x65x5=8.96 SHS75x75x5=10.6 SHS90x90x6=15.1 SHS100x100x6=17.0
+SHS125x125x9=31.6 SHS150x150x9=38.6 SHS200x200x9=52.3
+CHS-CIRC-HOLLOW:
+CHS60.3x3.6=5.03 CHS88.9x4=8.38 CHS114.3x4.5=12.2 CHS168.3x6=24.0 CHS219.1x8=41.6
+"""
+
+_JURISDICTION_TEXT = {
+    "USA": _USA_TABLE,
+    "CANADA": _CANADA_TABLE,
+    "AUSTRALIA": _AUSTRALIA_TABLE,
+}
+
+# A designation is a token containing at least one letter (so bare numbers on the
+# right-hand side are never mistaken for a profile name), followed by = and its kg/m.
+_TOKEN_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9./]*?)\s*=\s*([0-9]+(?:\.[0-9]+)?)")
+_ALL_NUM_RE = re.compile(r"^[0-9.]+$")
+
+
+def _normalise(profile: str) -> str:
+    """Upper-case, strip whitespace, and collapse the common separator variants
+    so 'w12 x 26', 'W12X26' and 'W12x26' all match one key."""
+    if not profile:
+        return ""
+    p = profile.strip().upper()
+    p = p.replace(" ", "").replace("×", "X").replace("*", "X")
+    return p
+
+
+def _build_table(text: str) -> dict[str, float]:
+    table: dict[str, float] = {}
+    for name, weight in _TOKEN_RE.findall(text):
+        key = _normalise(name)
+        if not key or _ALL_NUM_RE.match(key):
+            continue  # skip stray bare numbers
+        if key in ("W", "L", "C", "HSS", "PIPE"):
+            continue
+        table[key] = float(weight)
+    return table
+
+
+UNIT_WEIGHTS: dict[str, dict[str, float]] = {
+    j: _build_table(t) for j, t in _JURISDICTION_TEXT.items()
+}
+
+
+def weight_table_text(jurisdiction: str = "USA") -> str:
+    """The kg/m reference block for the detected jurisdiction, for prompt injection."""
+    j = (jurisdiction or "USA").upper()
+    body = _JURISDICTION_TEXT.get(j, _USA_TABLE)
+    return (
+        f"UNIT-WEIGHT REFERENCE — {j} (kg/m) — use these EXACT figures, never deviate.\n"
+        f"Plates/flat bars: Weight(kg) = Thickness(mm) x Width(mm) x Length(m) x 0.00785.\n"
+        f"If a profile is absent here, compute from the published section mass and flag it.\n"
+        f"{body}"
+    )
+
+
+def lookup_unit_weight(profile: str, jurisdiction: str = "USA") -> float | None:
+    """Return the published kg/m for a profile, or None if it is not a tabled section."""
+    key = _normalise(profile)
+    if not key:
+        return None
+    table = UNIT_WEIGHTS.get((jurisdiction or "USA").upper(), UNIT_WEIGHTS["USA"])
+    if key in table:
+        return table[key]
+    # Fall back to any jurisdiction — profile catalogues overlap and a mis-detected
+    # jurisdiction should not silently drop a weight we actually know.
+    for tbl in UNIT_WEIGHTS.values():
+        if key in tbl:
+            return tbl[key]
+    return None
+
+
+def plate_weight_kg(thickness_mm: float, width_mm: float, length_m: float) -> float:
+    """Volumetric plate/bar weight: t(mm) x w(mm) x L(m) x 0.00785."""
+    return round(thickness_mm * width_mm * length_m * 0.00785, 3)
+
+
+def member_weight_kg(qty: float, length_m: float, unit_weight_kgm: float) -> float:
+    """Deterministic linear-member weight: Qty x Length(m) x unit weight(kg/m)."""
+    return round(qty * length_m * unit_weight_kgm, 3)
+
+
+def kg_to_lb(kg: float) -> float:
+    return round(kg * KG_TO_LB, 2)

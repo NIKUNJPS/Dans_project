@@ -62,6 +62,58 @@ def _format_money(amount: float, c: dict) -> str:
     return f"{sym}{amount:,.0f}"
 
 
+# Fabricator cost build-up — how a per-ton price decomposes across shop processes.
+# Used to turn a single headline number into a real estimator's line-by-line build-up.
+FAB_PROCESS_SPLIT = {
+    "Material (mill sections + plate)": 0.35,
+    "Shop labour (cut / fit / weld)":   0.30,
+    "Coatings / surface prep":          0.12,
+    "Consumables (weld wire / bolts)":  0.06,
+    "Equipment / burn-machine":         0.07,
+    "Overhead / QA-QC":                 0.06,
+    "Margin":                           0.04,
+}
+
+# Detailer cost build-up — how detailing hours split across activities.
+DET_ACTIVITY_SPLIT = {
+    "3D modelling":          0.40,
+    "Connection detailing":  0.25,
+    "Shop / erection drawings": 0.20,
+    "Checking / QC":         0.10,
+    "Revisions allowance":   0.05,
+}
+
+
+def _cost_buildup(subtotal_mid: float, split: dict, c: dict) -> list[dict]:
+    """Decompose a mid-scenario subtotal into itemized cost lines."""
+    return [
+        {
+            "item": label,
+            "share": f"{pct * 100:.0f}%",
+            "amount": _format_money(subtotal_mid * pct, c),
+            "amount_raw": _round(subtotal_mid * pct),
+        }
+        for label, pct in split.items()
+    ]
+
+
+def _confidence_band(score) -> dict:
+    """Turn a 0-100 confidence into a label + one-line caveat for the report."""
+    try:
+        s = int(score)
+    except (TypeError, ValueError):
+        s = 0
+    if s >= 80:
+        label, note = "High", "Take-off is well supported by the drawings; figures are firm."
+    elif s >= 60:
+        label, note = "Medium", "Take-off is sound; confirm the flagged RFIs before tender."
+    elif s > 0:
+        label, note = "Low", "Drawings are incomplete/ambiguous — treat as indicative and resolve RFIs."
+    else:
+        label, note = "—", ""
+    return {"score": s, "label": label, "note": note}
+
+
 # ============================================================
 # DETAILER  — hours-based
 # ============================================================
@@ -272,6 +324,8 @@ def apply_band_to_extracted(
         grand_mid     = subtotal_mid  + tax_mid
         grand_high    = subtotal_high + tax_high
         sanity = sanity_check(role=role, total=subtotal_mid, tonnage=tonnage, currency=c["currency"])
+        confidence = _confidence_band(extracted.get("confidence"))
+        cost_buildup = _cost_buildup(subtotal_mid, FAB_PROCESS_SPLIT, c)
 
         return {
             "role": role,
@@ -281,11 +335,21 @@ def apply_band_to_extracted(
             "visible": {
                 "extracted": {
                     "tonnage":          _round(tonnage),
+                    "member_tonnage":   extracted.get("member_tonnage", _round(tonnage)),
+                    "accessory_allowance_pct": extracted.get("accessory_allowance_pct", 3.0),
                     "members_counted":  extracted.get("members_counted", 0),
                     "primary_material": extracted.get("primary_material", ""),
+                    "jurisdiction":     extracted.get("jurisdiction", ""),
                     "drawings_seen":    extracted.get("drawings_seen", 0),
                     "notes":            extracted.get("notes", ""),
                 },
+                "line_items":       extracted.get("line_items", []),
+                "category_summary": extracted.get("category_summary", []),
+                "reconciliation":   extracted.get("reconciliation", {}),
+                "confidence":       confidence,
+                "assumptions":      extracted.get("assumptions", []),
+                "open_rfis":        extracted.get("open_rfis", []),
+                "cost_buildup":     cost_buildup,
                 "user_rate_low":  _format_money(rate_low,  c),
                 "user_rate_high": _format_money(rate_high, c),
                 "subtotal_low":   _format_money(subtotal_low,  c),
@@ -329,6 +393,8 @@ def apply_band_to_extracted(
         subtotal_high = total_hours * rate_high
         subtotal_mid  = (subtotal_low + subtotal_high) / 2.0
         sanity = sanity_check(role=role, total=subtotal_mid, drawings=drawings, currency=c["currency"])
+        confidence = _confidence_band(extracted.get("confidence"))
+        cost_buildup = _cost_buildup(subtotal_mid, DET_ACTIVITY_SPLIT, c)
 
         return {
             "role": role,
@@ -344,6 +410,11 @@ def apply_band_to_extracted(
                     "drawings_seen":         extracted.get("drawings_seen", 0),
                     "notes":                 extracted.get("notes", ""),
                 },
+                "line_items":       extracted.get("line_items", []),
+                "confidence":       confidence,
+                "assumptions":      extracted.get("assumptions", []),
+                "open_rfis":        extracted.get("open_rfis", []),
+                "cost_buildup":     cost_buildup,
                 "total_hours":     _round(total_hours),
                 "user_rate_low":   _format_money(rate_low,  c),
                 "user_rate_high":  _format_money(rate_high, c),

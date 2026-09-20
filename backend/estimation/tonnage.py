@@ -26,6 +26,7 @@ async def get_or_lock_tonnage(
     file_ids: list[str],
     file_pairs: list[tuple[str, str]],
     session_id: str,
+    country_code: str = "USA",
 ) -> dict | None:
     """Return the locked tonnage for this drawing-set, extracting + caching once.
 
@@ -48,7 +49,8 @@ async def get_or_lock_tonnage(
 
     try:
         extracted, engine = await extract_quantities(
-            role="fabricator", session_id=session_id, file_paths=file_pairs
+            role="fabricator", session_id=session_id, file_paths=file_pairs,
+            country_code=country_code,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("tonnage_lock_extract_failed key=%s error=%s", key, exc)

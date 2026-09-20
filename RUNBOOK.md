@@ -262,3 +262,61 @@ Change these via env vars (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, etc.) before your re
     ├── test_credentials.md             (seeded super admin creds)
     └── (this file)
 ```
+
+---
+
+## PART 9 · v4.3 — Accurate itemized take-off + auto-cleanup (what changed)
+
+### ① The estimation engine is now a real, deterministic material take-off
+The old estimator asked the model for a single bulk tonnage and multiplied by a rate —
+that is why the number felt like a guess. It now works the way a human estimator does:
+
+- **Member-by-member take-off.** STRUCTMIND CORE returns one line per piece
+  (type, mark, profile, qty, length, grade, source sheet). Long take-offs are streamed
+  and stitched — no truncation.
+- **Weights are re-computed in Python**, not trusted from the model. Every linear member
+  is `Qty × Length(m) × published unit weight (kg/m)` from the AISC / CISC / AS-NZS tables
+  in `backend/estimation/weights.py`. If the model's arithmetic disagrees by >3 % the row
+  is corrected and flagged `WEIGHT-RECONCILED`. **The same drawings always yield the same
+  tonnage** — it is a calculation, not an opinion.
+- **Full-fledged report.** Each estimate now carries: itemized line items, a category
+  roll-up, a cost build-up (material / shop labour / coatings / consumables / equipment /
+  overhead / margin), a **confidence score**, **assumptions**, and **open RFIs / gaps** —
+  all rendered in the UI and the PDF.
+
+Files: `estimation/weights.py` (new), `estimation/mto.py` (new engine),
+`estimation/ai_extract.py` (now a thin wrapper), `estimation/engine.py` (cost build-up +
+confidence), `estimation/pdf.py` (itemized + category + build-up + RFI sections).
+
+### ② New Estimate page (the engine is finally wired to the UI)
+`frontend/src/pages/Estimation.jsx` → route **`/estimate`**, in the sidebar as **Estimate**.
+Upload drawings, set the LOW/HIGH rate band, and get the full report with a PDF download.
+Gated by the existing `canRunEstimation` permission and `estimationCountries`.
+
+> Bring your own key: set `ANTHROPIC_API_KEY` in the backend env (see PART 1 ②). The engine
+> uses Claude (Sonnet 5 primary → Opus 4.8 fallback) and reads that key automatically.
+
+### ③ Unused projects are cleaned up
+- **Hard delete:** `DELETE /api/projects/{id}?hard=true` permanently removes a project and
+  everything under it (files on disk + DB, analyses, RFIs, estimates, tonnage locks).
+  Without `?hard=true` it still just archives, as before.
+- **Auto-sweep:** a background loop archives (or deletes) projects that were created but
+  never used — no files, analyses, RFIs or estimates — once they pass a grace period, and
+  removes orphaned uploaded files. Super admins can also run it on demand:
+  `POST /api/projects/maintenance/sweep?dry_run=true` (preview) then without `dry_run`.
+
+Control it with these env vars (all optional; safe defaults shown):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `AUTO_SWEEP_ENABLED` | `true` | Turn the background sweep on/off |
+| `AUTO_SWEEP_GRACE_HOURS` | `72` | Only touch records older than this |
+| `AUTO_SWEEP_INTERVAL_HOURS` | `12` | How often the sweep runs |
+| `AUTO_SWEEP_HARD` | `false` | `true` = permanently delete; `false` = archive (safe) |
+
+Files: `backend/cleanup.py` (new), `routes/projects.py`, `server.py`, `config.py`.
+
+### ④ Tests
+`backend/tests/test_estimation_engine.py` — offline unit tests (no server/Mongo needed)
+covering weight lookup, the take-off parser, weight reconciliation, the cost build-up,
+confidence banding and the cleanup date logic. Run: `pytest tests/test_estimation_engine.py`.

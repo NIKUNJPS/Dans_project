@@ -130,6 +130,149 @@ def _kpi_strip(st, kpis):
     return table
 
 
+# ─── SHARED STRUCTURED-REPORT SECTIONS (AI take-off) ──────────────
+_MAX_MTO_ROWS = 90  # cap the itemized table so the PDF stays a sane length
+
+
+def _confidence_line(st, v) -> list:
+    conf = v.get("confidence") or {}
+    if not conf or not conf.get("label") or conf.get("label") == "—":
+        return []
+    return [
+        Paragraph("ESTIMATE CONFIDENCE", st["h2"]),
+        Paragraph(f"<b>{conf.get('score', 0)} / 100 — {conf.get('label', '')}.</b> {conf.get('note', '')}", st["body"]),
+        Spacer(1, 0.12 * inch),
+    ]
+
+
+def _cost_buildup_section(st, v) -> list:
+    rows = v.get("cost_buildup") or []
+    if not rows:
+        return []
+    return [
+        Paragraph("COST BUILD-UP (MID SCENARIO)", st["h2"]),
+        _table(
+            [["Cost component", "Share", "Amount"]]
+            + [[r["item"], r["share"], r["amount"]] for r in rows]
+            + [["MID SUBTOTAL", "", v.get("subtotal_mid", "")]],
+            st, col_widths=[3.7 * inch, 1.0 * inch, 1.6 * inch], highlight_last=True,
+        ),
+        Spacer(1, 0.2 * inch),
+    ]
+
+
+def _category_section(st, v) -> list:
+    cats = v.get("category_summary") or []
+    if not cats:
+        return []
+    rows = [["Category", "Count", "Length (m)", "Weight (kg)", "Tons"]]
+    for cbk in cats:
+        rows.append([
+            cbk.get("category", "—"),
+            f"{cbk.get('count', 0):,}",
+            f"{cbk.get('length_m', 0):,.1f}",
+            f"{cbk.get('weight_kg', 0):,.1f}",
+            f"{cbk.get('tons', 0):,.2f}",
+        ])
+    total_t = sum(c.get("tons", 0) for c in cats)
+    total_kg = sum(c.get("weight_kg", 0) for c in cats)
+    rows.append(["PROJECT TOTAL", "", "", f"{total_kg:,.1f}", f"{total_t:,.2f}"])
+    return [
+        Paragraph("TAKE-OFF SUMMARY BY CATEGORY", st["h2"]),
+        _table(rows, st, col_widths=[2.5 * inch, 1.0 * inch, 1.3 * inch, 1.5 * inch, 1.0 * inch], highlight_last=True),
+        Spacer(1, 0.2 * inch),
+    ]
+
+
+def _line_items_section(st, v) -> list:
+    items = v.get("line_items") or []
+    if not items:
+        return []
+    header = ["No.", "Type", "Mark", "Profile", "Qty", "Len (mm)", "Wt (kg)", "Grade", "Sheet"]
+    rows = [header]
+    for it in items[:_MAX_MTO_ROWS]:
+        rows.append([
+            str(it.get("no", "")),
+            it.get("type", ""),
+            it.get("mark", ""),
+            it.get("profile", ""),
+            str(it.get("qty", "")),
+            f"{it.get('length_mm', 0):,.0f}",
+            f"{it.get('weight_kg', 0):,.1f}",
+            it.get("grade", ""),
+            it.get("source_sheet", ""),
+        ])
+    story = [
+        Paragraph("ITEMIZED MATERIAL TAKE-OFF (MEMBER BY MEMBER)", st["h2"]),
+        _table(
+            rows, st,
+            col_widths=[0.4 * inch, 0.95 * inch, 0.7 * inch, 1.0 * inch, 0.45 * inch,
+                        0.8 * inch, 0.8 * inch, 0.7 * inch, 0.7 * inch],
+        ),
+    ]
+    if len(items) > _MAX_MTO_ROWS:
+        story.append(Paragraph(
+            f"… plus {len(items) - _MAX_MTO_ROWS:,} more line items — full member-by-member "
+            f"take-off available in the CSV/Excel export.",
+            st["meta"],
+        ))
+    story.append(Spacer(1, 0.2 * inch))
+    return story
+
+
+def _detailer_tasks_section(st, v) -> list:
+    items = v.get("line_items") or []
+    if not items:
+        return []
+    rows = [["No.", "Task", "Qty", "Unit", "Hrs/unit", "Hours", "Basis"]]
+    for it in items[:40]:
+        rows.append([
+            str(it.get("no", "")),
+            it.get("task", ""),
+            str(it.get("qty", "")),
+            it.get("unit", ""),
+            f"{it.get('hours_per_unit', 0):,.2f}",
+            f"{it.get('hours', 0):,.1f}",
+            (it.get("basis", "") or "")[:60],
+        ])
+    total_h = sum(it.get("hours", 0) for it in items)
+    rows.append(["", "TOTAL HOURS", "", "", "", f"{total_h:,.1f}", ""])
+    return [
+        Paragraph("DETAILING WORKLOAD BREAKDOWN", st["h2"]),
+        _table(
+            rows, st,
+            col_widths=[0.4 * inch, 2.0 * inch, 0.55 * inch, 0.6 * inch, 0.8 * inch, 0.8 * inch, 2.05 * inch],
+            highlight_last=True,
+        ),
+        Spacer(1, 0.2 * inch),
+    ]
+
+
+def _assumptions_rfis_section(st, v) -> list:
+    story: list = []
+    assumptions = v.get("assumptions") or []
+    if assumptions:
+        story.append(Paragraph("ASSUMPTIONS", st["h2"]))
+        for a in assumptions[:20]:
+            story.append(Paragraph(f"&#9656; &nbsp; {a}", st["body"]))
+        story.append(Spacer(1, 0.12 * inch))
+    rfis = v.get("open_rfis") or []
+    if rfis:
+        rows = [["RFI", "Priority", "Question"]]
+        for r in rfis[:25]:
+            rows.append([
+                r.get("id", "—"),
+                r.get("priority", "—"),
+                (r.get("question", "") or "")[:180],
+            ])
+        story += [
+            Paragraph("OPEN RFIs / GAPS AFFECTING THIS ESTIMATE", st["h2"]),
+            _table(rows, st, col_widths=[1.1 * inch, 1.0 * inch, 5.1 * inch]),
+            Spacer(1, 0.2 * inch),
+        ]
+    return story
+
+
 # ─── DETAILER ─────────────────────────────────────────
 def _render_detailer(result: dict, project: str, st: dict) -> list:
     v = result["visible"]
@@ -179,7 +322,12 @@ def _render_detailer(result: dict, project: str, st: dict) -> list:
                 st, col_widths=[2.6 * inch, 1.4 * inch, 1.4 * inch, 1.4 * inch], highlight_last=True,
             ),
             Spacer(1, 0.25 * inch),
-
+        ]
+        story += _confidence_line(st, v)
+        story += _detailer_tasks_section(st, v)
+        story += _cost_buildup_section(st, v)
+        story += _assumptions_rfis_section(st, v)
+        story += [
             Paragraph("FINAL DETAILING RANGE", st["h2"]),
             Paragraph(v["grand_range_text"], st["moneyBig"]),
             Paragraph(
@@ -274,7 +422,13 @@ def _render_fabricator(result: dict, project: str, st: dict) -> list:
                 st, col_widths=[2.6 * inch, 1.4 * inch, 1.4 * inch, 1.4 * inch], highlight_last=True,
             ),
             Spacer(1, 0.25 * inch),
-
+        ]
+        story += _confidence_line(st, v)
+        story += _category_section(st, v)
+        story += _cost_buildup_section(st, v)
+        story += _line_items_section(st, v)
+        story += _assumptions_rfis_section(st, v)
+        story += [
             Paragraph("FINAL FABRICATION RANGE", st["h2"]),
             Paragraph(v["grand_range_text"], st["moneyBig"]),
             Paragraph(
