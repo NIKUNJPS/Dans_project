@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import multiprocessing
 import os
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from typing import Iterable
 
 import anthropic
@@ -341,6 +343,37 @@ def _rasterize_pdf(file_path: str, dpi: int = 150, max_dimension_px: int = 2200)
                 pass
 
 
+# spawn (not fork) — this process runs an asyncio loop with background threads, and
+# fork()ing a multi-threaded process is a classic deadlock/corruption hazard (locks
+# held by other threads at fork time stay locked forever in the child). spawn starts a
+# clean interpreter instead.
+_MP_SPAWN_CONTEXT = multiprocessing.get_context("spawn")
+
+
+def _run_rasterize_in_subprocess(file_path: str) -> str | None:
+    """Run `_rasterize_pdf` in a disposable, isolated subprocess.
+
+    Production evidence: PyMuPDF hard-crashed the entire server process on a
+    genuinely corrupted PDF ("MuPDF error: format error: object ... was not found in
+    its object stream", immediately followed by the whole instance restarting — no
+    catchable Python exception was ever logged, the process itself died). That crash
+    took down every in-flight request for every user, not just this one analysis.
+
+    A worker subprocess dying is a normal, catchable `BrokenProcessPool` here instead —
+    the crash is contained to a process we were going to throw away anyway.
+    """
+    try:
+        with ProcessPoolExecutor(max_workers=1, mp_context=_MP_SPAWN_CONTEXT) as executor:
+            future = executor.submit(_rasterize_pdf, file_path)
+            return future.result(timeout=180)
+    except BrokenProcessPool as exc:
+        logger.warning("pdf_rasterize_subprocess_crashed path=%s error=%s", file_path, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pdf_rasterize_subprocess_failed path=%s error=%s", file_path, exc)
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core generation — streaming call with continuation support
 # ─────────────────────────────────────────────────────────────────────────────
@@ -571,23 +604,29 @@ async def _run_batch_with_fallback(
 
         # Down to a single file and it still failed — escalate through repair tiers:
         # structural rewrite first (cheap, fixes broken xref/object streams), then a
-        # full rasterize-and-rebuild (fixes bad embedded image encodings the structural
-        # pass can't touch).
+        # full rasterize-and-rebuild (fixes bad embedded image encodings, and genuinely
+        # corrupted objects, that the structural pass can't touch). Each tier repairs
+        # the BEST output so far, not always the raw original — a file that crashed the
+        # rasterizer once should never be handed to it again.
         file_path, mime = batch[0]
         if (mime or "").lower() == "application/pdf":
+            loop = asyncio.get_running_loop()
+            current_path = file_path
+            temp_paths: list[str] = []
             for repair_fn, repair_label in (
                 (_sanitize_pdf, "repaired"),
-                (_rasterize_pdf, "rasterized"),
+                (_run_rasterize_in_subprocess, "rasterized"),
             ):
-                repaired = repair_fn(file_path)
+                repaired = await loop.run_in_executor(_EXECUTOR, repair_fn, current_path)
                 if not repaired:
                     continue
+                temp_paths.append(repaired)
                 logger.warning(
                     "file_rejected_retrying_%s session=%s path=%s",
                     repair_label, session_id, file_path,
                 )
                 try:
-                    return await _run_single_batch(
+                    result = await _run_single_batch(
                         client=client,
                         model_name=model_name,
                         system_prompt=system_prompt,
@@ -597,13 +636,21 @@ async def _run_batch_with_fallback(
                         total_batches=1,
                         session_id=session_id,
                     )
+                    for p in temp_paths:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                    return result
                 except Exception as exc2:  # noqa: BLE001
                     exc = exc2
-                finally:
-                    try:
-                        os.remove(repaired)
-                    except OSError:
-                        pass
+                    current_path = repaired  # next tier builds on this output
+
+            for p in temp_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
         raise RuntimeError(
             f"Claude could not process '{os.path.basename(file_path)}' even in "
