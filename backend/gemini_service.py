@@ -689,6 +689,169 @@ async def _run_batches(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# single_pass: probe-then-analyze
+#
+# _run_batch_with_fallback (above) runs the REAL analysis prompt on every bisected
+# sub-batch and merges the resulting reports. That is correct for the multi-batch
+# takeoff path (_run_batches / _build_batches), where each batch's piece counts are
+# meant to be summed. It is WRONG for single_pass modes with "never invent — halt if
+# scope is missing" instructions (Estimation Pro): a sub-batch that only contains, say,
+# the MEP sheets has no way to know the structural sheets exist in a sibling batch, so
+# it correctly (per its own rules) concludes "no structural steel here" and produces a
+# full halt/RFI report — which then gets merged against a sibling batch's real, valid
+# estimate into one self-contradictory document. Confirmed in production.
+#
+# The fix: never run the real prompt on a partial file set. A cheap, mode-agnostic
+# probe prompt is used to discover which file(s) need repair; the real prompt then
+# runs exactly once, against the complete, corrected file list.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PROBE_SYSTEM_PROMPT = "You verify that documents opened successfully. Do not summarize or analyze content."
+_PROBE_USER_TEXT = (
+    "Reply with exactly the single word OK if every attached document opened and you "
+    "can see its pages. Do not describe, summarize, or analyze the content."
+)
+
+
+async def _probe_batch_with_fallback(
+    *,
+    client: anthropic.Anthropic,
+    model_name: str,
+    batch: list[tuple[str, str]],
+    session_id: str,
+) -> list[tuple[str, str]]:
+    """Discover which files in `batch` Claude's PDF pipeline can actually ingest,
+    substituting repaired/rasterized versions for any that need it — using a trivial
+    probe prompt, never the real analysis prompt (see module note above).
+
+    Returns the resolved (file_path, mime) list: originals where they worked, repaired
+    temp-file substitutes where they didn't. Raises if a file is unrepairable even
+    after every tier.
+    """
+    try:
+        await _run_single_batch(
+            client=client,
+            model_name=model_name,
+            system_prompt=_PROBE_SYSTEM_PROMPT,
+            user_text=_PROBE_USER_TEXT,
+            batch_files=batch,
+            batch_num=1,
+            total_batches=1,
+            session_id=session_id,
+        )
+        return batch
+    except Exception as exc:  # noqa: BLE001
+        if len(batch) > 1:
+            mid = len(batch) // 2
+            halves = [batch[:mid], batch[mid:]]
+            logger.warning(
+                "probe_batch_rejected session=%s files=%d error=%s — isolating as %d smaller batches",
+                session_id, len(batch), exc, len(halves),
+            )
+            resolved: list[tuple[str, str]] = []
+            for half in halves:
+                resolved.extend(
+                    await _probe_batch_with_fallback(
+                        client=client, model_name=model_name, batch=half, session_id=session_id,
+                    )
+                )
+            return resolved
+
+        file_path, mime = batch[0]
+        if (mime or "").lower() == "application/pdf":
+            loop = asyncio.get_running_loop()
+            current_path = file_path
+            for repair_fn, repair_label in (
+                (_sanitize_pdf, "repaired"),
+                (_run_rasterize_in_subprocess, "rasterized"),
+            ):
+                repaired = await loop.run_in_executor(_EXECUTOR, repair_fn, current_path)
+                if not repaired:
+                    continue
+                logger.warning(
+                    "probe_file_rejected_retrying_%s session=%s path=%s",
+                    repair_label, session_id, file_path,
+                )
+                try:
+                    await _run_single_batch(
+                        client=client,
+                        model_name=model_name,
+                        system_prompt=_PROBE_SYSTEM_PROMPT,
+                        user_text=_PROBE_USER_TEXT,
+                        batch_files=[(repaired, mime)],
+                        batch_num=1,
+                        total_batches=1,
+                        session_id=session_id,
+                    )
+                    return [(repaired, mime)]
+                except Exception as exc2:  # noqa: BLE001
+                    exc = exc2
+                    current_path = repaired  # next tier builds on this output
+
+        raise RuntimeError(
+            f"Claude could not process '{os.path.basename(file_path)}' even in "
+            f"isolation (repair + rasterize attempted). It may be corrupted, encrypted, "
+            f"or in a non-standard format — re-export/re-save this file and try again. "
+            f"Original error: {exc}"
+        ) from exc
+
+
+async def _run_single_pass(
+    *,
+    client: anthropic.Anthropic,
+    model_name: str,
+    system_prompt: str,
+    user_text: str,
+    file_paths_list: list[tuple[str, str]],
+    session_id: str,
+) -> str:
+    """Run the whole file set as ONE call. On rejection, probe-repair the files (never
+    the real prompt on a partial set — see module note above), then run the real call
+    exactly once more against the complete, corrected file list.
+    """
+    try:
+        return await _run_single_batch(
+            client=client,
+            model_name=model_name,
+            system_prompt=system_prompt,
+            user_text=user_text,
+            batch_files=file_paths_list,
+            batch_num=1,
+            total_batches=1,
+            session_id=session_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not file_paths_list:
+            raise
+        logger.warning(
+            "single_pass_failed session=%s model=%s error=%s — probing files to repair and retry",
+            session_id, model_name, exc,
+        )
+        resolved_files = await _probe_batch_with_fallback(
+            client=client, model_name=model_name, batch=file_paths_list, session_id=session_id,
+        )
+        original_paths = {p for p, _ in file_paths_list}
+        temp_paths = [p for p, _ in resolved_files if p not in original_paths]
+        try:
+            return await _run_single_batch(
+                client=client,
+                model_name=model_name,
+                system_prompt=system_prompt,
+                user_text=user_text,
+                batch_files=resolved_files,
+                batch_num=1,
+                total_batches=1,
+                session_id=session_id,
+            )
+        finally:
+            for p in temp_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -709,27 +872,29 @@ async def run_analysis(
                           recomputed by summation (report_merge)
       • Model fallback  — Opus 4.8 → Sonnet 5 on any error/refusal
 
-    single_pass=True keeps the whole drawing set in ONE call (no split, no merge) so a
-    mode with locked/derived totals (the Estimation engines) stays internally consistent.
-    There is no pre-guessed size/page cap anywhere in this path: every batch (including
-    the single_pass whole-set one) runs through `_run_batch_with_fallback`, which reacts
-    to an actual rejection by bisecting the batch and, if it narrows down to one file
-    that still fails, attempting a repair pass — always converging back to ONE final
-    merged report rather than hard-failing the analysis.
+    single_pass=True keeps the whole drawing set in ONE call so a mode with locked
+    totals and "never invent — halt if scope is missing" rules (the Estimation
+    engines) always reasons over the COMPLETE file set, never a fragment. If that
+    call is rejected, recovery uses a cheap, mode-agnostic probe prompt to find and
+    repair the offending file(s) — the real prompt then runs exactly once more, on the
+    complete, corrected file list. (Running the real prompt on a partial file set was
+    a confirmed production bug: a sub-batch missing the structural sheets would
+    correctly refuse to invent numbers, and that refusal would get merged against a
+    sibling sub-batch's real estimate into one self-contradictory report.)
+
+    single_pass=False splits large file sets into size-capped batches and fuses their
+    per-batch results with the deterministic, lossless merge — appropriate there
+    because each batch's piece counts are meant to be summed, not judged for scope
+    presence.
 
     Returns (output_markdown, engine_display_label).
     """
     last_err: Exception | None = None
     file_paths_list = list(file_paths)
 
-    if file_paths_list:
-        batches = [file_paths_list] if single_pass else _build_batches(file_paths_list)
-    else:
-        batches = [[]]
-
     logger.info(
-        "run_analysis_start session=%s total_files=%d total_file_batches=%d single_pass=%s",
-        session_id, len(file_paths_list), len(batches), single_pass,
+        "run_analysis_start session=%s total_files=%d single_pass=%s",
+        session_id, len(file_paths_list), single_pass,
     )
 
     for model_name in MODEL_CHAIN:
@@ -737,32 +902,42 @@ async def run_analysis(
             logger.info("model_attempt model=%s session=%s", model_name, session_id)
             client = _get_client()
 
-            batch_outputs = await _run_batches(
-                client=client,
-                model_name=model_name,
-                system_prompt=system_prompt,
-                user_text=user_text,
-                batches=batches,
-                session_id=session_id,
-            )
-
-            if len(batch_outputs) == 1:
-                final_output = batch_outputs[0]
-            else:
-                # Fuse batches into ONE report with the deterministic, lossless merge.
-                final_output = merge_reports(batch_outputs)
-                logger.info(
-                    "deterministic_merge_used model=%s session=%s batches=%d",
-                    model_name, session_id, len(batches),
+            if single_pass:
+                final_output = await _run_single_pass(
+                    client=client,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    user_text=user_text,
+                    file_paths_list=file_paths_list,
+                    session_id=session_id,
                 )
+            else:
+                batches = _build_batches(file_paths_list) if file_paths_list else [[]]
+                batch_outputs = await _run_batches(
+                    client=client,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    user_text=user_text,
+                    batches=batches,
+                    session_id=session_id,
+                )
+                if len(batch_outputs) == 1:
+                    final_output = batch_outputs[0]
+                else:
+                    # Fuse batches into ONE report with the deterministic, lossless merge.
+                    final_output = merge_reports(batch_outputs)
+                    logger.info(
+                        "deterministic_merge_used model=%s session=%s batches=%d",
+                        model_name, session_id, len(batches),
+                    )
 
             # Navigable headings + strip the trailing tonnage-summary footer.
             final_output = normalize_section_headings(final_output)
             final_output = strip_summary_footer(final_output)
 
             logger.info(
-                "run_analysis_complete model=%s session=%s file_batches=%d",
-                model_name, session_id, len(batches),
+                "run_analysis_complete model=%s session=%s",
+                model_name, session_id,
             )
             return final_output, engine_label(model_name)
 
