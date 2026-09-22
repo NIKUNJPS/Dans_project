@@ -259,6 +259,53 @@ def _sanitize_pdf(file_path: str) -> str | None:
         return None
 
 
+def _rasterize_pdf(file_path: str, dpi: int = 200) -> str | None:
+    """Last-resort repair: render every page to an image and rebuild a brand-new PDF
+    from those images.
+
+    `_sanitize_pdf` only rewrites the page/xref *structure* — it copies embedded image
+    streams through unchanged, so it can't fix a file whose problem is in the image
+    encoding itself (e.g. JBIG2/CCITT-compressed scans, common in CAD/architectural
+    drawing exports, that some parsers choke on). Rasterizing sidesteps that entirely:
+    Claude's PDF vision pipeline already converts every page to an image internally, so
+    rebuilding the PDF as images loses nothing it would have used anyway. Returns the
+    path to the rebuilt PDF, or None if this fails too.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        logger.warning("pymupdf_not_installed — cannot attempt PDF rasterization")
+        return None
+    img_paths: list[str] = []
+    try:
+        src = fitz.open(file_path)
+        out = fitz.open()
+        matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        for page in src:
+            pix = page.get_pixmap(matrix=matrix)
+            img_fd, img_path = tempfile.mkstemp(suffix=".png")
+            os.close(img_fd)
+            pix.save(img_path)
+            img_paths.append(img_path)
+            new_page = out.new_page(width=pix.width, height=pix.height)
+            new_page.insert_image(fitz.Rect(0, 0, pix.width, pix.height), filename=img_path)
+        fd, out_path = tempfile.mkstemp(suffix=".rasterized.pdf")
+        os.close(fd)
+        out.save(out_path)
+        out.close()
+        src.close()
+        return out_path
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pdf_rasterize_failed path=%s error=%s", file_path, exc)
+        return None
+    finally:
+        for p in img_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core generation — streaming call with continuation support
 # ─────────────────────────────────────────────────────────────────────────────
@@ -487,14 +534,22 @@ async def _run_batch_with_fallback(
             ]
             return merge_reports(outputs)
 
-        # Down to a single file and it still failed — try one repair pass.
+        # Down to a single file and it still failed — escalate through repair tiers:
+        # structural rewrite first (cheap, fixes broken xref/object streams), then a
+        # full rasterize-and-rebuild (fixes bad embedded image encodings the structural
+        # pass can't touch).
         file_path, mime = batch[0]
         if (mime or "").lower() == "application/pdf":
-            repaired = _sanitize_pdf(file_path)
-            if repaired:
+            for repair_fn, repair_label in (
+                (_sanitize_pdf, "repaired"),
+                (_rasterize_pdf, "rasterized"),
+            ):
+                repaired = repair_fn(file_path)
+                if not repaired:
+                    continue
                 logger.warning(
-                    "file_rejected_retrying_repaired session=%s path=%s",
-                    session_id, file_path,
+                    "file_rejected_retrying_%s session=%s path=%s",
+                    repair_label, session_id, file_path,
                 )
                 try:
                     return await _run_single_batch(
@@ -517,8 +572,8 @@ async def _run_batch_with_fallback(
 
         raise RuntimeError(
             f"Claude could not process '{os.path.basename(file_path)}' even in "
-            f"isolation (repair attempted). It may be corrupted, encrypted, or in a "
-            f"non-standard format — re-export/re-save this file and try again. "
+            f"isolation (repair + rasterize attempted). It may be corrupted, encrypted, "
+            f"or in a non-standard format — re-export/re-save this file and try again. "
             f"Original error: {exc}"
         ) from exc
 
