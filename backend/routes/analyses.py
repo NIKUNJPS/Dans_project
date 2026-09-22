@@ -137,8 +137,9 @@ async def _run_analysis_task(analysis_id: str):
             )
 
         # Estimation engines produce one locked, internally-consistent manifest
-        # (tonnage/hours → cost). They must NOT be split across batches and merged, or
-        # the headline figures would disagree. Run them in a single coherent pass.
+        # (tonnage/hours → cost), so they default to a single coherent pass instead of
+        # batching. run_analysis only falls back to batching + merge for this mode when
+        # the drawing set is too large for Claude's PDF pipeline to accept in one request.
         single_pass = mode_id in {"ESTIMATION_PRO", "FABRICATOR_ESTIMATION_PRO"}
 
         output, model_used = await run_analysis(

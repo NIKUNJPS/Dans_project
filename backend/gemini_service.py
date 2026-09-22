@@ -61,6 +61,14 @@ ENGINE_LABELS: dict[str, str] = {
 MAX_BATCH_MB        = 90.0   # max total MB per upload batch (Files API allows 500MB/file)
 MAX_FILES_PER_BATCH = 8      # files per batch (product spec: 8 per batch)
 
+# single_pass (Estimation engines) normally sends the whole drawing set in ONE call.
+# Anthropic's PDF pipeline can still reject a request before any formal page/size limit
+# is reached when the combined PDFs are large/dense enough (documented behaviour, not a
+# bug) — e.g. "Could not process PDF" on a ~100MB, 4-file drawing set. Past this size,
+# single_pass falls back to the same batching + deterministic merge used elsewhere,
+# rather than hard-failing the analysis.
+MAX_SINGLE_PASS_MB  = MAX_BATCH_MB
+
 # Output token budget per call. Opus 4.8 / Sonnet 5 support up to 128K output; we use
 # 64K (streamed) — large enough that most take-offs finish in one or two calls, and
 # continuation stitches the rest. Adaptive thinking shares this budget with the answer.
@@ -424,7 +432,10 @@ async def run_analysis(
       • Model fallback  — Opus 4.8 → Sonnet 5 on any error/refusal
 
     single_pass=True keeps the whole drawing set in ONE call (no split, no merge) so a
-    mode with locked/derived totals (the Estimation engines) stays internally consistent.
+    mode with locked/derived totals (the Estimation engines) stays internally consistent —
+    unless the set is too large/dense for Claude's PDF pipeline to accept in one request,
+    in which case it automatically falls back to batching + the deterministic merge (still
+    ONE final report, never returned batch-by-batch).
 
     Returns (output_markdown, engine_display_label).
     """
@@ -432,6 +443,16 @@ async def run_analysis(
     file_paths_list = list(file_paths)
 
     if file_paths_list:
+        total_mb = sum(
+            os.path.getsize(fp) for fp, _ in file_paths_list if os.path.exists(fp)
+        ) / (1_024 * 1_024)
+        if single_pass and total_mb > MAX_SINGLE_PASS_MB:
+            logger.info(
+                "single_pass_oversized session=%s total_mb=%.1f limit_mb=%.1f — "
+                "falling back to batched + merged single_pass",
+                session_id, total_mb, MAX_SINGLE_PASS_MB,
+            )
+            single_pass = False
         batches = [file_paths_list] if single_pass else _build_batches(file_paths_list)
     else:
         batches = [[]]
