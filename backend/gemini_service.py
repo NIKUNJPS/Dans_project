@@ -259,7 +259,7 @@ def _sanitize_pdf(file_path: str) -> str | None:
         return None
 
 
-def _rasterize_pdf(file_path: str, dpi: int = 200) -> str | None:
+def _rasterize_pdf(file_path: str, dpi: int = 150, max_dimension_px: int = 2200) -> str | None:
     """Last-resort repair: render every page to an image and rebuild a brand-new PDF
     from those images.
 
@@ -268,37 +268,72 @@ def _rasterize_pdf(file_path: str, dpi: int = 200) -> str | None:
     encoding itself (e.g. JBIG2/CCITT-compressed scans, common in CAD/architectural
     drawing exports, that some parsers choke on). Rasterizing sidesteps that entirely:
     Claude's PDF vision pipeline already converts every page to an image internally, so
-    rebuilding the PDF as images loses nothing it would have used anyway. Returns the
-    path to the rebuilt PDF, or None if this fails too.
+    rebuilding the PDF as images loses nothing it would have used anyway.
+
+    Memory is bounded per page. A flat DPI on a large-format drawing sheet (e.g. ARCH
+    D/E) can render to a 100+ megapixel bitmap — large enough to OOM-kill the whole
+    server on a single page, which is exactly what happened in production. Every page
+    is capped to `max_dimension_px` on its longest side (scaling the effective DPI down
+    for oversized pages), saved as JPEG (much lighter than PNG for scanned content), and
+    each page's pixmap is dropped before the next page renders, so peak memory stays
+    bounded no matter how physically large a page is. A single page that still fails to
+    render is skipped (logged) rather than aborting the whole file. Returns the path to
+    the rebuilt PDF, or None if no page could be rendered at all.
     """
     try:
-        import fitz  # PyMuPDF
+        import pymupdf as fitz
     except ImportError:
         logger.warning("pymupdf_not_installed — cannot attempt PDF rasterization")
         return None
+
     img_paths: list[str] = []
+    src = None
+    out = None
     try:
         src = fitz.open(file_path)
         out = fitz.open()
-        matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-        for page in src:
-            pix = page.get_pixmap(matrix=matrix)
-            img_fd, img_path = tempfile.mkstemp(suffix=".png")
-            os.close(img_fd)
-            pix.save(img_path)
-            img_paths.append(img_path)
-            new_page = out.new_page(width=pix.width, height=pix.height)
-            new_page.insert_image(fitz.Rect(0, 0, pix.width, pix.height), filename=img_path)
+        pages_rendered = 0
+        for page_num in range(len(src)):
+            pix = None
+            try:
+                page = src[page_num]
+                rect = page.rect
+                zoom = dpi / 72.0
+                long_side_px = max(rect.width, rect.height) * zoom
+                if long_side_px > max_dimension_px:
+                    zoom = max_dimension_px / max(rect.width, rect.height)
+
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                img_fd, img_path = tempfile.mkstemp(suffix=".jpg")
+                os.close(img_fd)
+                pix.save(img_path, jpg_quality=85)
+                img_paths.append(img_path)
+                new_page = out.new_page(width=pix.width, height=pix.height)
+                new_page.insert_image(fitz.Rect(0, 0, pix.width, pix.height), filename=img_path)
+                pages_rendered += 1
+            except Exception as page_exc:  # noqa: BLE001
+                logger.warning(
+                    "pdf_rasterize_page_failed path=%s page=%d error=%s",
+                    file_path, page_num, page_exc,
+                )
+            finally:
+                pix = None
+
+        if pages_rendered == 0:
+            return None
+
         fd, out_path = tempfile.mkstemp(suffix=".rasterized.pdf")
         os.close(fd)
         out.save(out_path)
-        out.close()
-        src.close()
         return out_path
     except Exception as exc:  # noqa: BLE001
         logger.warning("pdf_rasterize_failed path=%s error=%s", file_path, exc)
         return None
     finally:
+        if out is not None:
+            out.close()
+        if src is not None:
+            src.close()
         for p in img_paths:
             try:
                 os.remove(p)
