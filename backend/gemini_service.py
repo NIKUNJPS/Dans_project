@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable
@@ -228,6 +229,36 @@ def _file_block(file_id: str, mime: str) -> dict:
     return {"type": "document", "source": {"type": "file", "file_id": file_id}}
 
 
+def _sanitize_pdf(file_path: str) -> str | None:
+    """Re-serialize a PDF with pypdf, normalizing its internal structure.
+
+    Tools like PDFsam (evident in this app's uploaded filenames) can emit PDFs with
+    non-standard xref tables / object streams that open fine in normal viewers but get
+    rejected by Claude's stricter PDF parser ("Could not process PDF"). Reading with
+    pypdf and rewriting the pages to a fresh file repairs that class of issue. Returns
+    the path to the repaired copy, or None if the file can't be read/repaired at all
+    (e.g. genuinely corrupted or encrypted).
+    """
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        logger.warning("pypdf_not_installed — cannot attempt PDF repair")
+        return None
+    try:
+        reader = PdfReader(file_path, strict=False)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+        fd, out_path = tempfile.mkstemp(suffix=".repaired.pdf")
+        os.close(fd)
+        with open(out_path, "wb") as fh:
+            writer.write(fh)
+        return out_path
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pdf_repair_failed path=%s error=%s", file_path, exc)
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core generation — streaming call with continuation support
 # ─────────────────────────────────────────────────────────────────────────────
@@ -402,6 +433,96 @@ async def _run_single_batch(
             _cleanup_files(client, uploaded)
 
 
+async def _run_batch_with_fallback(
+    *,
+    client: anthropic.Anthropic,
+    model_name: str,
+    system_prompt: str,
+    user_text: str,
+    batch: list[tuple[str, str]],
+    session_id: str,
+) -> str:
+    """Run one file batch. If Claude's API rejects it, isolate the cause instead of
+    hard-failing the whole analysis:
+
+      • A rejected batch of >1 files is bisected and each half retried recursively —
+        this narrows down to whichever file(s) are actually at fault, and merges the
+        (still lossless) results back into one output.
+      • A single file that still fails on its own is repaired once (PDFs produced by
+        tools like PDFsam can carry non-standard internal structure — see
+        `_sanitize_pdf`) and retried before giving up on it.
+
+    There is no pre-guessed size/page cap anywhere in this path — every fallback is a
+    reaction to what Claude's API actually rejected.
+    """
+    try:
+        return await _run_single_batch(
+            client=client,
+            model_name=model_name,
+            system_prompt=system_prompt,
+            user_text=user_text,
+            batch_files=batch,
+            batch_num=1,
+            total_batches=1,
+            session_id=session_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if len(batch) > 1:
+            mid = len(batch) // 2
+            halves = [batch[:mid], batch[mid:]]
+            logger.warning(
+                "batch_rejected session=%s files=%d error=%s — isolating as %d smaller batches",
+                session_id, len(batch), exc, len(halves),
+            )
+            outputs = [
+                await _run_batch_with_fallback(
+                    client=client,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    user_text=user_text,
+                    batch=half,
+                    session_id=session_id,
+                )
+                for half in halves
+            ]
+            return merge_reports(outputs)
+
+        # Down to a single file and it still failed — try one repair pass.
+        file_path, mime = batch[0]
+        if (mime or "").lower() == "application/pdf":
+            repaired = _sanitize_pdf(file_path)
+            if repaired:
+                logger.warning(
+                    "file_rejected_retrying_repaired session=%s path=%s",
+                    session_id, file_path,
+                )
+                try:
+                    return await _run_single_batch(
+                        client=client,
+                        model_name=model_name,
+                        system_prompt=system_prompt,
+                        user_text=user_text,
+                        batch_files=[(repaired, mime)],
+                        batch_num=1,
+                        total_batches=1,
+                        session_id=session_id,
+                    )
+                except Exception as exc2:  # noqa: BLE001
+                    exc = exc2
+                finally:
+                    try:
+                        os.remove(repaired)
+                    except OSError:
+                        pass
+
+        raise RuntimeError(
+            f"Claude could not process '{os.path.basename(file_path)}' even in "
+            f"isolation (repair attempted). It may be corrupted, encrypted, or in a "
+            f"non-standard format — re-export/re-save this file and try again. "
+            f"Original error: {exc}"
+        ) from exc
+
+
 async def _run_batches(
     *,
     client: anthropic.Anthropic,
@@ -411,21 +532,19 @@ async def _run_batches(
     batches: list[list[tuple[str, str]]],
     session_id: str,
 ) -> list[str]:
-    """Run every file batch sequentially and return each batch's raw output."""
+    """Run every top-level file batch (each with its own isolate-and-repair fallback)."""
     outputs: list[str] = []
     for i, batch in enumerate(batches, 1):
         logger.info(
-            "file_batch_start batch=%d/%d model=%s session=%s",
-            i, len(batches), model_name, session_id,
+            "file_batch_start batch=%d/%d model=%s session=%s files=%d",
+            i, len(batches), model_name, session_id, len(batch),
         )
-        output = await _run_single_batch(
+        output = await _run_batch_with_fallback(
             client=client,
             model_name=model_name,
             system_prompt=system_prompt,
             user_text=user_text,
-            batch_files=batch,
-            batch_num=i,
-            total_batches=len(batches),
+            batch=batch,
             session_id=session_id,
         )
         outputs.append(output)
@@ -455,10 +574,11 @@ async def run_analysis(
 
     single_pass=True keeps the whole drawing set in ONE call (no split, no merge) so a
     mode with locked/derived totals (the Estimation engines) stays internally consistent.
-    There is no pre-guessed size/page cap on this — if Claude's PDF pipeline actually
-    rejects that one call (e.g. "Could not process PDF" on an unusually large/dense
-    combined set), it is retried ONCE as batches + the deterministic merge, still
-    returning ONE final report rather than hard-failing the analysis.
+    There is no pre-guessed size/page cap anywhere in this path: every batch (including
+    the single_pass whole-set one) runs through `_run_batch_with_fallback`, which reacts
+    to an actual rejection by bisecting the batch and, if it narrows down to one file
+    that still fails, attempting a repair pass — always converging back to ONE final
+    merged report rather than hard-failing the analysis.
 
     Returns (output_markdown, engine_display_label).
     """
@@ -479,35 +599,15 @@ async def run_analysis(
         try:
             logger.info("model_attempt model=%s session=%s", model_name, session_id)
             client = _get_client()
-            used_batches = batches
 
-            try:
-                batch_outputs = await _run_batches(
-                    client=client,
-                    model_name=model_name,
-                    system_prompt=system_prompt,
-                    user_text=user_text,
-                    batches=batches,
-                    session_id=session_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                if single_pass and len(file_paths_list) > 1:
-                    logger.warning(
-                        "single_pass_failed model=%s session=%s error=%s — "
-                        "retrying as batched + merged",
-                        model_name, session_id, exc,
-                    )
-                    used_batches = _build_batches(file_paths_list)
-                    batch_outputs = await _run_batches(
-                        client=client,
-                        model_name=model_name,
-                        system_prompt=system_prompt,
-                        user_text=user_text,
-                        batches=used_batches,
-                        session_id=session_id,
-                    )
-                else:
-                    raise
+            batch_outputs = await _run_batches(
+                client=client,
+                model_name=model_name,
+                system_prompt=system_prompt,
+                user_text=user_text,
+                batches=batches,
+                session_id=session_id,
+            )
 
             if len(batch_outputs) == 1:
                 final_output = batch_outputs[0]
@@ -516,7 +616,7 @@ async def run_analysis(
                 final_output = merge_reports(batch_outputs)
                 logger.info(
                     "deterministic_merge_used model=%s session=%s batches=%d",
-                    model_name, session_id, len(used_batches),
+                    model_name, session_id, len(batches),
                 )
 
             # Navigable headings + strip the trailing tonnage-summary footer.
@@ -525,7 +625,7 @@ async def run_analysis(
 
             logger.info(
                 "run_analysis_complete model=%s session=%s file_batches=%d",
-                model_name, session_id, len(used_batches),
+                model_name, session_id, len(batches),
             )
             return final_output, engine_label(model_name)
 
