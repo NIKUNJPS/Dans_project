@@ -74,6 +74,15 @@ async def hard_delete_project(db, pid: str, upload_dir: str) -> dict:
 
     disk_removed = await _delete_files_on_disk(db, file_docs, upload_dir)
 
+    # Generated report exports live on disk under <upload_dir>/exports/<analysis id>.<ext>.
+    export_dir = Path(upload_dir) / "exports"
+    async for a in db.analyses.find({"project_id": pid}, {"_id": 0, "id": 1}):
+        for ext in ("pdf", "docx", "xlsx", "csv", "md"):
+            try:
+                (export_dir / f"{a['id']}.{ext}").unlink(missing_ok=True)
+            except OSError:
+                pass
+
     files_res = await db.files.delete_many({"project_id": pid})
     analyses_res = await db.analyses.delete_many({"project_id": pid})
     rfis_res = await db.rfis.delete_many({"project_id": pid})
@@ -82,7 +91,7 @@ async def hard_delete_project(db, pid: str, upload_dir: str) -> dict:
     # reference this project's now-deleted files.
     est_res = tl_res = None
     if file_ids:
-        est_res = await db.estimates.delete_many({"file_ids": {"$in": file_ids}})
+        est_res = await db.estimates.delete_many({"$or": [{"file_ids": {"$in": file_ids}}, {"project_id": pid}]})
         tl_res = await db.tonnage_locks.delete_many({"file_ids": {"$in": file_ids}})
 
     await db.projects.delete_one({"id": pid})

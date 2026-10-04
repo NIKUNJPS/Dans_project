@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import re
 import shutil
 import tempfile
 import time
@@ -21,7 +21,9 @@ from config import settings
 from db import get_db
 from export_service import EXPORT_DIR, generate_all_exports
 from file_prep import prepare_file
-from gemini_service import run_analysis
+from claude_engine import has_credentials
+from estimation.tonnage import TakeoffCache
+from pipeline import Cancelled, run_mode
 from middleware.permission_guard import (
     audit_log,
     bump_usage,
@@ -49,8 +51,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_JURISDICTION_BY_COUNTRY = {"USA": "USA", "US": "USA", "CANADA": "CANADA", "AUSTRALIA": "AUSTRALIA"}
+
+
 async def _run_analysis_task(analysis_id: str):
-    """Background task to call STRUCTMIND CORE, update analysis, generate exports."""
+    """Background task: run the binder pipeline, store ONE report, then build exports."""
     db = get_db()
     started = time.time()
     analysis = await db.analyses.find_one({"id": analysis_id})
@@ -68,53 +73,52 @@ async def _run_analysis_task(analysis_id: str):
         return
 
     await db.analyses.update_one(
-        {"id": analysis_id}, {"$set": {"status": "processing", "stage": "analyzing"}}
+        {"id": analysis_id},
+        {"$set": {"status": "processing", "stage": "Preparing binder",
+                  "progress": {"label": "Preparing binder", "done": 0, "total": 1}}},
     )
 
-    # Prepare the files for the model: pass PDFs/images/text straight through, and
-    # CONVERT Excel→CSV, Word→text, and text-based engineering files (NC1/DSTV/…) so a
-    # much wider range of uploads "just works". Converted copies live in a scratch dir
-    # that is cleaned up after the run. Only proprietary binaries (DWG/DXF/RVT/…) are
-    # skipped — with a precise "export to PDF" message rather than a silent empty run.
+    # Convert what the model can't read natively (Excel→CSV, Word→text, NC/DSTV→text);
+    # proprietary CAD/BIM binaries are reported back with an "export to PDF" note.
     scratch_dir = Path(tempfile.mkdtemp(prefix=f"prep_{analysis_id[:12]}_"))
     file_docs = []
     if analysis.get("file_ids"):
         file_docs = await db.files.find({"id": {"$in": analysis["file_ids"]}}).to_list(1000)
-    file_pairs: list[tuple[str, str]] = []
+        order = {fid: i for i, fid in enumerate(analysis["file_ids"])}
+        file_docs.sort(key=lambda f: order.get(f["id"], 1_000_000))
+    files: list[tuple[str, str, str]] = []
     skipped_files: list[str] = []
     for f in file_docs:
-        pair, status = prepare_file(f, Path(settings.upload_dir), scratch_dir)
+        pair, _status = prepare_file(f, Path(settings.upload_dir), scratch_dir)
+        name = f.get("original_name") or f.get("storage_key") or "file"
         if pair:
-            file_pairs.append(pair)
+            files.append((pair[0], pair[1], name))
         else:
-            skipped_files.append(f.get("original_name") or f.get("storage_key") or "unknown file")
+            skipped_files.append(name)
+
+    async def progress(label: str, done: int, total: int) -> None:
+        await db.analyses.update_one(
+            {"id": analysis_id},
+            {"$set": {"stage": label, "progress": {"label": label, "done": done, "total": total}}},
+        )
+
+    async def cancelled() -> bool:
+        return await db.analyses.count_documents({"id": analysis_id}, limit=1) == 0
 
     try:
-        if not (settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")):
+        if not has_credentials():
+            raise RuntimeError("No LLM credentials configured. Set ANTHROPIC_API_KEY in the environment.")
+        if file_docs and not files:
             raise RuntimeError(
-                "No LLM credentials configured. Set ANTHROPIC_API_KEY in the environment."
+                "None of the uploaded files could be read (" + ", ".join(skipped_files) + "). PDF, images, "
+                "Excel, Word and text/fabrication files are supported; proprietary CAD/BIM (.dwg/.dxf/.rvt/"
+                ".nwd/.ifc) must be exported to PDF first."
             )
 
-        # Files were uploaded but none are machine-readable — fail loudly with a precise
-        # fix rather than letting the model answer "no files were attached".
-        if file_docs and not file_pairs:
-            raise RuntimeError(
-                "None of the uploaded files could be read ("
-                + ", ".join(skipped_files)
-                + "). PDF, images, Excel, Word and text/fabrication files are supported, "
-                "but proprietary binary CAD/BIM (.dwg/.dxf/.rvt/.nwd/.ifc) must be exported "
-                "to PDF (or PNG/JPG) first — please upload that."
-            )
-
-        requester = await db.users.find_one(
-            {"id": analysis["requested_by"]}, {"_id": 0, "role": 1}
-        )
+        requester = await db.users.find_one({"id": analysis["requested_by"]}, {"_id": 0, "role": 1, "country": 1})
         requester_role = (requester or {}).get("role", "detailer")
+        jurisdiction = _JURISDICTION_BY_COUNTRY.get(str((requester or {}).get("country") or "USA").upper(), "USA")
 
-        # Tonnage is owned by ONE mode only — the MTO Engine — which computes it from its
-        # own detailed member-by-member take-off. We deliberately inject NO external
-        # tonnage figure: a second (rougher) estimate only ever conflicted with the MTO's
-        # detailed total. Master Intake discloses no tonnage at all (handled in its prompt).
         system_persona = get_system_prompt(requester_role)
         mode_prompt = get_mode_prompt(requester_role, mode_id)
         composed_system_prompt = (
@@ -122,80 +126,75 @@ async def _run_analysis_task(analysis_id: str):
             f"## MODE: {meta['label']}\n{mode_prompt}\n\n"
             f"## GLOBAL FORMATTING\n{GLOBAL_FORMAT_RULES}"
         )
-
-        user_text = analysis.get("input_text") or ""
-        if not user_text.strip():
-            user_text = (
-                f"Run the {meta['label']} mode on the attached drawings / inputs. "
-                f"Follow every instruction in the mode prompt verbatim."
-            )
+        user_text = (analysis.get("input_text") or "").strip()
         if skipped_files:
             user_text += (
-                "\n\nNOTE: these uploaded files are proprietary binary CAD/BIM and were "
-                "excluded — export them to PDF to include them: "
-                + ", ".join(skipped_files) + "."
+                "\n\nNOTE: these uploads are proprietary CAD/BIM binaries and were not readable; "
+                "export them to PDF to include them: " + ", ".join(skipped_files) + "."
             )
 
-        # Estimation engines produce one locked, internally-consistent manifest
-        # (tonnage/hours → cost), so they default to a single coherent pass instead of
-        # batching. run_analysis only falls back to batching + merge for this mode when
-        # the drawing set is too large for Claude's PDF pipeline to accept in one request.
-        single_pass = mode_id in {"ESTIMATION_PRO", "FABRICATOR_ESTIMATION_PRO"}
-
-        output, model_used = await run_analysis(
-            session_id=analysis_id,
+        result = await run_mode(
+            mode_id=mode_id,
             system_prompt=composed_system_prompt,
             user_text=user_text,
-            file_paths=file_pairs,
-            single_pass=single_pass,
+            files=files,
+            skipped=skipped_files,
+            progress=progress,
+            cancelled=cancelled,
+            label=analysis_id,
+            jurisdiction_hint=jurisdiction,
+            takeoff_cache=TakeoffCache(analysis.get("file_ids") or []),
         )
+        output, model_used = result.markdown, result.engine
+    except Cancelled:
+        logger.info("analysis_cancelled id=%s (deleted while running)", analysis_id)
+        return
     except Exception as e:  # noqa: BLE001
         logger.exception("Analysis failed")
         await db.analyses.update_one(
             {"id": analysis_id},
-            {
-                "$set": {
-                    "status": "failed",
-                    "error_message": str(e),
-                    "completed_at": _now_iso(),
-                }
-            },
+            {"$set": {"status": "failed", "stage": "failed", "error_message": str(e), "completed_at": _now_iso()}},
         )
         return
     finally:
-        # Converted copies are uploaded inside run_analysis; drop the scratch dir now.
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
     elapsed = round(time.time() - started, 2)
     output_hash = sha256_hex(output)
 
-    # Heuristic issue counting
-    crit = output.upper().count("CRITICAL")
-    major = output.upper().count("MAJOR")
-    minor = output.upper().count("MINOR") + output.upper().count("OBSERVATION")
+    # Issue counts from the report's own priority labels.
+    up = output.upper()
+    crit = len(re.findall(r"\bCRITICAL\b", up))
+    major = len(re.findall(r"\b(?:MAJOR|URGENT)\b", up))
+    minor = len(re.findall(r"\b(?:MINOR|STANDARD|OBSERVATION)\b", up))
     issues = {"critical": crit, "major": major, "minor": minor, "total": crit + major + minor}
     quality = max(0, min(100, 100 - crit * 8 - major * 3 - minor * 1))
 
-    # Persist the result and mark COMPLETE *first*. The report must never be lost and
-    # the UI must update the instant the analysis finishes — even if export rendering is
-    # slow or fails. Exports are generated afterwards as a best-effort step (below).
-    await db.analyses.update_one(
+    # Persist the report and mark COMPLETE first — exports are best-effort afterwards.
+    res = await db.analyses.update_one(
         {"id": analysis_id},
         {
             "$set": {
                 "status": "complete",
                 "stage": "complete",
+                "progress": {"label": "Complete", "done": 1, "total": 1},
                 "output_markdown": output,
                 "model_used": model_used,
                 "processing_time_seconds": elapsed,
                 "issues_found": issues,
                 "quality_score": quality,
                 "blockchain_hash": output_hash,
+                "binder": result.meta.get("binder"),
+                "usage": result.meta.get("usage"),
+                "takeoff_summary": result.meta.get("takeoff_summary"),
+                "estimate_summary": result.meta.get("estimate"),
                 "exports": [],
                 "completed_at": _now_iso(),
             }
         },
     )
+    if res.matched_count == 0:
+        return  # deleted while the report was being written
 
     user_id = analysis["requested_by"]
     await db.notifications.insert_one(
@@ -210,48 +209,42 @@ async def _run_analysis_task(analysis_id: str):
             "created_at": _now_iso(),
         }
     )
+    await db.users.update_one({"id": user_id}, {"$inc": {"usage_this_month.analyses": 1}})
 
-    await db.users.update_one(
-        {"id": user_id}, {"$inc": {"usage_this_month.analyses": 1}}
-    )
-
-    # ── Best-effort exports — generated AFTER completion, off the event loop ──
-    # A failure or slowness here can never block completion or lose the report. The
-    # blocking renderers run in a worker thread so the single web process keeps serving
-    # requests (status polling, etc.) while PDFs/Word/Excel are built.
     try:
-        proj = (
-            await db.projects.find_one({"id": analysis.get("project_id")})
-            if analysis.get("project_id")
-            else None
-        )
-        export_meta = {
-            "id": analysis_id,
-            "mode_label": meta["label"],
-            "project_name": proj["name"] if proj else "Quick Analysis",
-            "completed_at": _now_iso(),
-            "model_used": model_used,
-            "blockchain_hash": output_hash,
-        }
+        export_meta = await _export_meta(db, {**analysis, "completed_at": _now_iso(), "model_used": model_used,
+                                              "blockchain_hash": output_hash, "mode_label": meta["label"]})
         exports = await asyncio.to_thread(generate_all_exports, output, export_meta)
         await db.analyses.update_one(
             {"id": analysis_id},
-            {
-                "$set": {
-                    "exports": [
-                        {
-                            "format": e["format"],
-                            "url": f"/api/analyses/{analysis_id}/export/{e['format']}",
-                            "generated_at": _now_iso(),
-                        }
-                        for e in exports
-                        if e.get("path")
-                    ],
-                }
-            },
+            {"$set": {"exports": [
+                {"format": e["format"], "url": f"/api/analyses/{analysis_id}/export/{e['format']}",
+                 "generated_at": _now_iso()}
+                for e in exports if e.get("path")
+            ]}},
         )
     except Exception:  # noqa: BLE001 — exports are non-critical; the report is already saved
         logger.exception("export_generation_failed analysis=%s", analysis_id)
+
+
+async def _export_meta(db, a: dict) -> dict:
+    proj = await db.projects.find_one({"id": a.get("project_id")}) if a.get("project_id") else None
+    return {
+        "id": a["id"],
+        "mode_label": a.get("mode_label", "Report"),
+        "project_name": proj["name"] if proj else (a.get("project_name") or "Quick Analysis"),
+        "completed_at": a.get("completed_at", ""),
+        "model_used": a.get("model_used", ""),
+        "blockchain_hash": a.get("blockchain_hash", ""),
+    }
+
+
+def _remove_exports(aid: str) -> None:
+    for ext in ("pdf", "docx", "xlsx", "csv", "md"):
+        try:
+            (EXPORT_DIR / f"{aid}.{ext}").unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @router.get("/modes")
@@ -354,17 +347,87 @@ async def create_analysis(
 @router.get("")
 async def list_analyses(
     project_id: str | None = None,
-    limit: int = 50,
+    quick: bool = False,
+    limit: int = 200,
     user=Depends(get_current_user),
 ):
+    """List analyses. `project_id` scopes to one project (owner and team see all of the
+    project's runs); `quick=true` lists Quick Analyses (no project)."""
     db = get_db()
     q: dict = {}
     if project_id:
         q["project_id"] = project_id
-    if user["role"] != "super_admin":
-        q["requested_by"] = user["id"]
-    items = await db.analyses.find(q, {"_id": 0, "output_markdown": 0}).sort("created_at", -1).to_list(limit)
+        if user["role"] != "super_admin":
+            p = await db.projects.find_one({"id": project_id})
+            if not p or not _can_access_project(p, user):
+                raise HTTPException(status_code=403, detail="Access denied to project")
+    else:
+        if quick:
+            q["project_id"] = {"$in": [None, ""]}
+        if user["role"] != "super_admin":
+            q["requested_by"] = user["id"]
+    items = await db.analyses.find(q, {"_id": 0, "output_markdown": 0}).sort("created_at", -1).to_list(min(limit, 1000))
     return {"items": items, "total": len(items)}
+
+
+def _can_access_project(p: dict, user: dict) -> bool:
+    return p.get("owner_id") == user["id"] or any(t.get("user_id") == user["id"] for t in p.get("team_members", []))
+
+
+async def _can_delete(db, a: dict, user: dict) -> bool:
+    """Requester, super admin, or the owner of the analysis's project."""
+    if user["role"] == "super_admin" or a.get("requested_by") == user["id"]:
+        return True
+    if a.get("project_id"):
+        p = await db.projects.find_one({"id": a["project_id"]}, {"_id": 0, "owner_id": 1})
+        return bool(p and p.get("owner_id") == user["id"])
+    return False
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_analyses(payload: dict, request: Request, user=Depends(get_current_user)):
+    """Delete analysis history in one call.
+
+    Body (one of):
+      {"ids": [...]}                — specific analyses
+      {"project_id": "..."}         — every analysis of a project (owner / super admin)
+      {"scope": "quick"}            — every Quick Analysis (no project) of the caller
+    Report exports on disk are removed too. Running analyses stop at their next batch.
+    """
+    block_write_if_readonly(user)
+    db = get_db()
+    ids = [i for i in (payload.get("ids") or []) if isinstance(i, str)]
+    project_id = payload.get("project_id")
+    scope = payload.get("scope")
+    if ids:
+        q: dict = {"id": {"$in": ids}}
+    elif project_id:
+        p = await db.projects.find_one({"id": project_id})
+        if not p:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if user["role"] != "super_admin" and p.get("owner_id") != user["id"]:
+            raise HTTPException(status_code=403, detail="Only the project owner can clear its history")
+        q = {"project_id": project_id}
+    elif scope == "quick":
+        q = {"project_id": {"$in": [None, ""]}, "requested_by": user["id"]}
+    else:
+        raise HTTPException(status_code=422, detail="Provide ids, project_id, or scope='quick'.")
+
+    deleted: list[str] = []
+    async for a in db.analyses.find(q, {"_id": 0, "id": 1, "requested_by": 1, "project_id": 1}):
+        if project_id or scope == "quick" or await _can_delete(db, a, user):
+            deleted.append(a["id"])
+    if deleted:
+        await db.analyses.delete_many({"id": {"$in": deleted}})
+        for aid in deleted:
+            _remove_exports(aid)
+    est_deleted = 0
+    if project_id and payload.get("include_estimates", True):
+        res = await db.estimates.delete_many({"project_id": project_id})
+        est_deleted = res.deleted_count
+    await audit_log(user["id"], "analysis.bulk_delete", "analysis", project_id or scope or "ids", request,
+                    extra={"count": len(deleted), "estimates": est_deleted})
+    return {"deleted": len(deleted), "estimates_deleted": est_deleted}
 
 
 @router.get("/{aid}")
@@ -390,7 +453,8 @@ async def get_status(aid: str, user=Depends(get_current_user)):
     db = get_db()
     a = await db.analyses.find_one(
         {"id": aid},
-        {"_id": 0, "status": 1, "stage": 1, "processing_time_seconds": 1, "model_used": 1, "error_message": 1},
+        {"_id": 0, "status": 1, "stage": 1, "progress": 1, "processing_time_seconds": 1, "model_used": 1,
+         "error_message": 1},
     )
     if not a:
         raise HTTPException(status_code=404, detail="Analysis not found")
@@ -414,12 +478,14 @@ async def rerun_analysis(
         raise HTTPException(status_code=403, detail="Access denied")
     check_mode_access(perms, a["mode"])
     await check_usage_limit(user["id"], perms)
+    _remove_exports(aid)
     await db.analyses.update_one(
         {"id": aid},
         {
             "$set": {
                 "status": "queued",
                 "stage": "queued",
+                "progress": {"label": "Queued", "done": 0, "total": 1},
                 "output_markdown": "",
                 "error_message": "",
                 "exports": [],
@@ -446,7 +512,9 @@ async def download_export(
     if not a:
         raise HTTPException(status_code=404, detail="Analysis not found")
     if user["role"] != "super_admin" and a["requested_by"] != user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+        p = await db.projects.find_one({"id": a.get("project_id")}) if a.get("project_id") else None
+        if not p or not _can_access_project(p, user):
+            raise HTTPException(status_code=403, detail="Access denied")
     if user["role"] != "super_admin":
         check_feature(perms, "canDownloadReports")
     fmt_alias = {"docx": "word", "xlsx": "excel"}.get(fmt, fmt)
@@ -463,19 +531,7 @@ async def download_export(
     # the user is never blocked by a missing export file.
     if not path.exists():
         if a.get("status") == "complete" and a.get("output_markdown"):
-            proj = (
-                await db.projects.find_one({"id": a.get("project_id")})
-                if a.get("project_id")
-                else None
-            )
-            export_meta = {
-                "id": aid,
-                "mode_label": a.get("mode_label", "Report"),
-                "project_name": proj["name"] if proj else a.get("project_name", "Quick Analysis"),
-                "completed_at": a.get("completed_at", ""),
-                "model_used": a.get("model_used", ""),
-                "blockchain_hash": a.get("blockchain_hash", ""),
-            }
+            export_meta = await _export_meta(db, a)
             try:
                 await asyncio.to_thread(generate_all_exports, a["output_markdown"], export_meta)
             except Exception:  # noqa: BLE001
@@ -508,8 +564,9 @@ async def delete_analysis(
     a = await db.analyses.find_one({"id": aid})
     if not a:
         raise HTTPException(status_code=404, detail="Analysis not found")
-    if user["role"] != "super_admin" and a["requested_by"] != user["id"]:
+    if not await _can_delete(db, a, user):
         raise HTTPException(status_code=403, detail="Access denied")
     await db.analyses.delete_one({"id": aid})
+    _remove_exports(aid)
     await audit_log(user["id"], "analysis.delete", "analysis", aid, request)
     return {"message": "Analysis deleted"}

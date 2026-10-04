@@ -2,13 +2,12 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
     ArrowRight,
-    Calendar,
     ChevronRight,
     FileIcon,
-    FolderKanban,
+    History,
     MessageSquareQuote,
-    Plus,
     Sparkles,
+    Trash2,
     Users,
 } from "lucide-react";
 import { api, errMessage } from "@/lib/api";
@@ -47,6 +46,72 @@ export default function ProjectDetail() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [id]);
 
+    // Keep running analyses' status fresh without a manual reload.
+    useEffect(() => {
+        if (!analyses.some((a) => a.status === "queued" || a.status === "processing")) return;
+        const t = setInterval(async () => {
+            try {
+                const { data } = await api.get(`/api/analyses?project_id=${id}`);
+                setAnalyses(data.items);
+            } catch {}
+        }, 5000);
+        return () => clearInterval(t);
+    }, [analyses, id]);
+
+    const deleteAnalysis = async (a) => {
+        if (!window.confirm(`Delete the "${a.mode_label || a.mode}" report? This cannot be undone.`)) return;
+        try {
+            await api.delete(`/api/analyses/${a.id}`);
+            setAnalyses((prev) => prev.filter((x) => x.id !== a.id));
+            toast.success("Report deleted");
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+    };
+
+    const clearHistory = async () => {
+        if (
+            !window.confirm(
+                `Delete ALL ${analyses.length} report(s) and estimates in this project's history? Uploaded drawings are kept. This cannot be undone.`,
+            )
+        )
+            return;
+        try {
+            const { data } = await api.post("/api/analyses/bulk-delete", { project_id: id });
+            setAnalyses([]);
+            toast.success(`History cleared — ${data.deleted} report(s) removed`);
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+    };
+
+    const deleteFile = async (f) => {
+        if (!window.confirm(`Delete "${f.original_name}" from this project?`)) return;
+        try {
+            await api.delete(`/api/files/${f.id}`);
+            setFiles((prev) => prev.filter((x) => x.id !== f.id));
+            toast.success("File deleted");
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+    };
+
+    const deleteProject = async () => {
+        if (
+            !window.confirm(
+                `Permanently delete "${project.name}" with all its drawings, reports, RFIs and estimates? This cannot be undone.`,
+            )
+        )
+            return;
+        try {
+            await api.delete(`/api/projects/${id}?hard=true`);
+            toast.success("Project deleted");
+            nav("/projects");
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+    };
+
     if (loading) return <Skeleton className="m-10 h-96 rounded-none" />;
     if (!project) return null;
 
@@ -80,7 +145,15 @@ export default function ProjectDetail() {
                             </div>
                         )}
                     </div>
-                    <div className="flex gap-3">
+                    <div className="flex flex-wrap gap-3">
+                        <button
+                            onClick={deleteProject}
+                            data-testid="project-delete-btn"
+                            className="inline-flex items-center gap-2 border border-destructive bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white"
+                        >
+                            <Trash2 size={14} />
+                            Delete project
+                        </button>
                         <Link
                             to={`/projects/${id}/analyze`}
                             data-testid="project-analyze-btn"
@@ -132,42 +205,79 @@ export default function ProjectDetail() {
                             </Link>
                         }
                     >
-                        {files.slice(0, 6).map((f) => (
-                            <div
-                                key={f.id}
-                                data-testid={`project-file-${f.id}`}
-                                className="flex items-center justify-between border-b border-ink-line py-2 last:border-b-0"
-                            >
-                                <div className="min-w-0 flex-1 truncate text-sm text-navy">
-                                    {f.original_name}
+                        <div className="max-h-[420px] overflow-y-auto">
+                            {files.map((f) => (
+                                <div
+                                    key={f.id}
+                                    data-testid={`project-file-${f.id}`}
+                                    className="flex items-center justify-between gap-3 border-b border-ink-line py-2 last:border-b-0"
+                                >
+                                    <div className="min-w-0 flex-1 truncate text-sm text-navy">
+                                        {f.original_name}
+                                    </div>
+                                    <div className="font-mono text-[10px] uppercase text-ink-muted">
+                                        {f.size_mb} MB
+                                    </div>
+                                    <button
+                                        onClick={() => deleteFile(f)}
+                                        className="text-ink-muted hover:text-destructive"
+                                        aria-label={`Delete ${f.original_name}`}
+                                    >
+                                        <Trash2 size={14} />
+                                    </button>
                                 </div>
-                                <div className="font-mono text-[10px] uppercase text-ink-muted">
-                                    {f.size_mb} MB
-                                </div>
-                            </div>
-                        ))}
+                            ))}
+                        </div>
                     </SectionBlock>
 
                     <SectionBlock
-                        title="Analyses"
+                        title="Report history"
                         count={analyses.length}
                         emptyText="No analyses yet."
+                        action={
+                            analyses.length > 0 && (
+                                <button
+                                    onClick={clearHistory}
+                                    data-testid="project-clear-history"
+                                    className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-destructive hover:underline"
+                                >
+                                    <History size={12} />
+                                    Clear history
+                                </button>
+                            )
+                        }
                     >
-                        {analyses.slice(0, 6).map((a) => (
-                            <Link
-                                key={a.id}
-                                to={`/analyses/${a.id}`}
-                                data-testid={`project-analysis-${a.id}`}
-                                className="flex items-center justify-between border-b border-ink-line py-2 last:border-b-0 hover:text-gold"
-                            >
-                                <div className="min-w-0 flex-1 truncate font-heading text-sm font-semibold uppercase tracking-wide text-navy hover:text-gold">
-                                    {a.mode_label || a.mode}
+                        <div className="max-h-[420px] overflow-y-auto">
+                            {analyses.map((a) => (
+                                <div
+                                    key={a.id}
+                                    data-testid={`project-analysis-${a.id}`}
+                                    className="flex items-center justify-between gap-3 border-b border-ink-line py-2 last:border-b-0"
+                                >
+                                    <Link to={`/analyses/${a.id}`} className="min-w-0 flex-1 hover:text-gold">
+                                        <div className="truncate font-heading text-sm font-semibold uppercase tracking-wide text-navy hover:text-gold">
+                                            {a.mode_label || a.mode}
+                                        </div>
+                                        <div className="font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                                            {a.created_at ? new Date(a.created_at).toLocaleString() : ""}
+                                            {a.takeoff_summary
+                                                ? ` · ${(a.takeoff_summary.jurisdiction || "USA") === "USA"
+                                                      ? `${Number(a.takeoff_summary.gross_short_tons || 0).toFixed(2)} sh tons`
+                                                      : `${Number(a.takeoff_summary.gross_t || 0).toFixed(2)} t`}`
+                                                : ""}
+                                        </div>
+                                    </Link>
+                                    <StatusPill status={a.status} progress={a.progress} />
+                                    <button
+                                        onClick={() => deleteAnalysis(a)}
+                                        className="text-ink-muted hover:text-destructive"
+                                        aria-label="Delete report"
+                                    >
+                                        <Trash2 size={14} />
+                                    </button>
                                 </div>
-                                <div className="font-mono text-[10px] uppercase text-ink-muted">
-                                    {a.status}
-                                </div>
-                            </Link>
-                        ))}
+                            ))}
+                        </div>
                     </SectionBlock>
                 </div>
             </div>
@@ -213,5 +323,23 @@ function SectionBlock({ title, count, children, emptyText, action }) {
                 )}
             </div>
         </div>
+    );
+}
+
+function StatusPill({ status, progress }) {
+    const tone =
+        status === "complete"
+            ? "border-success text-success"
+            : status === "failed"
+              ? "border-destructive text-destructive"
+              : "border-gold text-navy";
+    const label =
+        (status === "processing" || status === "queued") && progress?.total > 1
+            ? `${status} ${progress.done}/${progress.total}`
+            : status;
+    return (
+        <span className={`whitespace-nowrap border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${tone}`}>
+            {label}
+        </span>
     );
 }

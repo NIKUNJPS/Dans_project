@@ -31,8 +31,20 @@ class Settings:
     otp_expiry_seconds: int = int(os.environ.get("OTP_EXPIRY_SECONDS", "300"))
     otp_length: int = int(os.environ.get("OTP_LENGTH", "6"))
 
-    # LLM
+    # LLM — Claude via the Anthropic API (bring your own key)
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
+    # Primary + fallback model. Opus 5.5 is the most accurate drawing reader; the fallback
+    # only runs if the primary errors out after the SDK's own retries.
+    anthropic_model: str = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
+    anthropic_fallback_model: str = os.environ.get("ANTHROPIC_FALLBACK_MODEL", "claude-sonnet-5-5")
+    # Reasoning depth for analysis calls: low | medium | high | xhigh | max.
+    anthropic_effort: str = os.environ.get("ANTHROPIC_EFFORT", "high")
+    # Server-side refusal fallback (Claude API only — disable on Bedrock/Vertex/Foundry).
+    anthropic_server_fallback: bool = os.environ.get("ANTHROPIC_SERVER_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
+    # How many page batches of one binder are read in parallel.
+    batch_concurrency: int = int(os.environ.get("BATCH_CONCURRENCY", "4"))
+    # Process-wide cap on simultaneous Claude calls (all users, all analyses).
+    max_parallel_calls: int = int(os.environ.get("MAX_PARALLEL_CLAUDE_CALLS", "8"))
     # Legacy (kept so old env vars don't break config load; no longer used by the engine)
     emergent_llm_key: str = os.environ.get("EMERGENT_LLM_KEY", "")
     gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")

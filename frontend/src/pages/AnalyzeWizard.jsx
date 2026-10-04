@@ -25,6 +25,7 @@ export default function AnalyzeWizard() {
     const [instructions, setInstructions] = useState("");
     const [running, setRunning] = useState(false);
     const [loadingModes, setLoadingModes] = useState(true);
+    const [uploadState, setUploadState] = useState(null); // {index, count, name, pct}
 
     useEffect(() => {
         (async () => {
@@ -45,7 +46,8 @@ export default function AnalyzeWizard() {
         (async () => {
             try {
                 const { data } = await api.get(`/api/files?project_id=${projectId}`);
-                setFiles(data.items);
+                // API lists newest first; the binder reads in upload order.
+                setFiles([...data.items].reverse());
             } catch {}
         })();
     }, [projectId]);
@@ -54,19 +56,27 @@ export default function AnalyzeWizard() {
         async (accepted) => {
             if (!accepted.length) return;
             setUploading(true);
-            for (const f of accepted) {
+            for (let i = 0; i < accepted.length; i++) {
+                const f = accepted[i];
                 const fd = new FormData();
                 fd.append("file", f);
                 if (projectId) fd.append("project_id", projectId);
+                setUploadState({ index: i + 1, count: accepted.length, name: f.name, pct: 0 });
                 try {
                     const { data } = await api.post("/api/files/upload", fd, {
                         headers: { "Content-Type": "multipart/form-data" },
+                        onUploadProgress: (ev) => {
+                            if (!ev.total) return;
+                            setUploadState((u) => (u ? { ...u, pct: Math.round((100 * ev.loaded) / ev.total) } : u));
+                        },
                     });
-                    setFiles((prev) => [data, ...prev]);
+                    // Keep binder order: files are read in the order they were added.
+                    setFiles((prev) => [...prev, data]);
                 } catch (e) {
                     toast.error(`${f.name} — ${errMessage(e)}`);
                 }
             }
+            setUploadState(null);
             setUploading(false);
         },
         [projectId],
@@ -163,7 +173,7 @@ export default function AnalyzeWizard() {
                                 Drop drawings, models & specs
                             </div>
                             <div className="mt-2 font-mono text-[11px] uppercase tracking-wider text-ink-muted">
-                                PDF · DWG · DXF · IFC · RVT · NWD · NC1 · DSTV · XLSX
+                                PDF binders (multi-file, 50 MB+) · Images · XLSX · DOCX · NC1 · DSTV
                             </div>
                             <div className="mt-4 inline-flex items-center gap-2 border border-navy bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-navy">
                                 Browse files
@@ -172,9 +182,27 @@ export default function AnalyzeWizard() {
 
                         <div className="mt-6 space-y-2">
                             {uploading && (
-                                <div className="flex items-center gap-2 border border-gold bg-gold-pale px-3 py-2 font-mono text-xs uppercase tracking-wider text-navy">
-                                    <span className="h-2 w-2 animate-pulse-ring rounded-full bg-gold" />
-                                    Uploading…
+                                <div className="border border-gold bg-gold-pale px-3 py-2 font-mono text-xs uppercase tracking-wider text-navy">
+                                    <div className="flex items-center gap-2">
+                                        <span className="h-2 w-2 animate-pulse-ring rounded-full bg-gold" />
+                                        {uploadState
+                                            ? `Uploading ${uploadState.index} of ${uploadState.count} · ${uploadState.name} · ${uploadState.pct}%`
+                                            : "Uploading…"}
+                                    </div>
+                                    {uploadState && (
+                                        <div className="mt-2 h-1.5 w-full bg-white">
+                                            <div className="h-full bg-gold transition-all" style={{ width: `${uploadState.pct}%` }} />
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            {files.length > 0 && (
+                                <div className="flex items-center justify-between border border-ink-line bg-background px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                                    <span>
+                                        Binder: {files.length} file{files.length === 1 ? "" : "s"} ·{" "}
+                                        {files.reduce((s, f) => s + (Number(f.size_mb) || 0), 0).toFixed(1)} MB
+                                    </span>
+                                    <span>Read in page batches · one consolidated report</span>
                                 </div>
                             )}
                             {files.map((f) => (

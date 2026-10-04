@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
 import {
     Calculator,
     Download,
     FileText,
+    History,
     Loader2,
+    Printer,
     ShieldCheck,
     Trash2,
     UploadCloud,
@@ -56,6 +58,65 @@ export default function Estimation() {
     const [running, setRunning] = useState(false);
     const [result, setResult] = useState(null);
     const [downloading, setDownloading] = useState(false);
+    const [history, setHistory] = useState([]);
+
+    const loadHistory = useCallback(async () => {
+        try {
+            const { data } = await api.get("/api/estimation/");
+            setHistory(data.items || []);
+        } catch {}
+    }, []);
+
+    useEffect(() => {
+        loadHistory();
+    }, [loadHistory]);
+
+    // The take-off runs as a background job; poll until it finishes.
+    useEffect(() => {
+        if (!result?.id || result.status !== "processing") return;
+        const t = setInterval(async () => {
+            try {
+                const { data } = await api.get(`/api/estimation/${result.id}`);
+                if (data.status === "complete") {
+                    setResult(data);
+                    setRunning(false);
+                    toast.success("Take-off complete.");
+                    loadHistory();
+                } else if (data.status === "failed") {
+                    setResult(null);
+                    setRunning(false);
+                    toast.error(data.error_message || "Estimate failed.");
+                    loadHistory();
+                } else {
+                    setResult(data);
+                }
+            } catch {}
+        }, 3000);
+        return () => clearInterval(t);
+    }, [result?.id, result?.status, loadHistory]);
+
+    const openEstimate = async (eid) => {
+        try {
+            const { data } = await api.get(`/api/estimation/${eid}`);
+            setResult(data);
+            if (data.role) setRole(data.role);
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+    };
+
+    const deleteEstimate = async (eid) => {
+        if (!window.confirm("Delete this estimate from your history? This cannot be undone.")) return;
+        try {
+            await api.delete(`/api/estimation/${eid}`);
+            setHistory((prev) => prev.filter((e) => e.id !== eid));
+            if (result?.id === eid) setResult(null);
+            toast.success("Estimate deleted");
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+    };
 
     const isFab = role === "fabricator";
     const rateUnit = isFab ? "/ ton" : "/ hr";
@@ -141,6 +202,11 @@ export default function Estimation() {
                 project_name: projectName || undefined,
             });
             setResult(data);
+            if (data.status === "processing") {
+                toast.success("Reading the drawing set — the estimate appears here when it is ready.");
+                loadHistory();
+                return; // polling finishes the run
+            }
             toast.success("Take-off complete.");
         } catch (e) {
             toast.error(errMessage(e));
@@ -167,6 +233,7 @@ export default function Estimation() {
         setDownloading(false);
     };
 
+    const processing = result?.status === "processing";
     const v = result?.result?.visible;
     const conf = v?.confidence;
     const lineItems = v?.line_items || [];
@@ -176,10 +243,8 @@ export default function Estimation() {
     const assumptions = v?.assumptions || [];
     const ex = v?.extracted || {};
 
-    const totalTons = useMemo(
-        () => cats.reduce((s, c) => s + (c.tons || 0), 0),
-        [cats],
-    );
+    const netKg = cats.reduce((s, c) => s + (c.weight_kg || 0), 0);
+    const tonUnit = ex.ton_unit || "tonne";
 
     return (
         <div className="mx-auto max-w-6xl px-8 py-8">
@@ -196,14 +261,14 @@ export default function Estimation() {
             </div>
 
             {!canRun && (
-                <div className="mt-6 border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+                <div className="no-print mt-6 border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
                     Estimation is not enabled for your account. Ask a super admin to enable
                     <span className="font-semibold"> canRunEstimation</span>.
                 </div>
             )}
 
             {/* ── INPUT PANEL ── */}
-            <div className="mt-6 grid gap-6 md:grid-cols-2">
+            <div className="no-print mt-6 grid gap-6 md:grid-cols-2">
                 <div className="space-y-4">
                     {isSuperAdmin && (
                         <div>
@@ -303,11 +368,32 @@ export default function Estimation() {
             <button
                 onClick={calculate}
                 disabled={running || !canRun || !files.length}
-                className="mt-6 inline-flex items-center gap-2 bg-navy px-6 py-3 font-heading text-sm uppercase tracking-wider text-white transition hover:bg-navy-mid disabled:cursor-not-allowed disabled:opacity-40"
+                className="no-print mt-6 inline-flex items-center gap-2 bg-navy px-6 py-3 font-heading text-sm uppercase tracking-wider text-white transition hover:bg-navy-mid disabled:cursor-not-allowed disabled:opacity-40"
             >
                 {running ? <Loader2 className="animate-spin" size={16} /> : <Calculator size={16} />}
                 {running ? "STRUCTMIND CORE is analysing…" : "Run take-off & estimate"}
             </button>
+
+            {processing && (
+                <div className="no-print mt-8 border border-gold bg-gold-pale/30 p-5">
+                    <div className="flex items-center gap-2 font-heading text-sm uppercase tracking-wide text-navy">
+                        <Loader2 className="animate-spin" size={16} />
+                        {result.progress?.label || "Preparing the drawing set"}
+                        {result.progress?.total > 1 ? ` — batch ${Math.min(result.progress.done + 1, result.progress.total)} of ${result.progress.total}` : ""}
+                    </div>
+                    {result.progress?.total > 0 && (
+                        <div className="mt-3 h-2 w-full border border-ink-line bg-white">
+                            <div
+                                className="h-full bg-gold transition-all duration-700"
+                                style={{ width: `${Math.max(4, Math.round((100 * (result.progress.done || 0)) / result.progress.total))}%` }}
+                            />
+                        </div>
+                    )}
+                    <div className="mt-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                        Large binders are read in page batches and consolidated into one take-off. You can leave this page — the estimate is saved to your history.
+                    </div>
+                </div>
+            )}
 
             {/* ── RESULT ── */}
             {v && (
@@ -315,24 +401,38 @@ export default function Estimation() {
                     <div className="flex items-center justify-between">
                         <h2 className="font-heading text-lg font-bold uppercase tracking-wide text-navy">
                             {isFab ? "Fabrication Estimate" : "Detailing Estimate"}
+                            {result?.project_name ? ` — ${result.project_name}` : ""}
                         </h2>
-                        <button
-                            onClick={downloadPdf}
-                            disabled={downloading}
-                            className="inline-flex items-center gap-2 border border-navy px-4 py-2 font-heading text-xs uppercase tracking-wider text-navy hover:bg-navy hover:text-white disabled:opacity-40"
-                        >
-                            {downloading ? <Loader2 className="animate-spin" size={14} /> : <Download size={14} />}
-                            PDF
-                        </button>
+                        <div className="no-print flex gap-2">
+                            <button
+                                onClick={() => window.print()}
+                                className="inline-flex items-center gap-2 border border-navy px-4 py-2 font-heading text-xs uppercase tracking-wider text-navy hover:bg-navy hover:text-white"
+                            >
+                                <Printer size={14} />
+                                Print
+                            </button>
+                            <button
+                                onClick={downloadPdf}
+                                disabled={downloading}
+                                className="inline-flex items-center gap-2 border border-navy px-4 py-2 font-heading text-xs uppercase tracking-wider text-navy hover:bg-navy hover:text-white disabled:opacity-40"
+                            >
+                                {downloading ? <Loader2 className="animate-spin" size={14} /> : <Download size={14} />}
+                                PDF
+                            </button>
+                        </div>
                     </div>
 
                     <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         {isFab ? (
-                            <Kpi label="Tonnage" value={`${(ex.tonnage ?? 0).toLocaleString()} t`} sub={`${ex.members_counted ?? 0} members`} />
+                            <Kpi
+                                label="Fabricated tonnage"
+                                value={`${(ex.tonnage ?? 0).toLocaleString()} ${tonUnit === "short ton" ? "sh tons" : "t"}`}
+                                sub={`${(ex.members_counted ?? 0).toLocaleString()} members (Σ Qty) · ${(ex.line_item_count ?? lineItems.length).toLocaleString()} line items`}
+                            />
                         ) : (
                             <Kpi label="Detailing hours" value={(v.total_hours ?? 0).toLocaleString()} sub={`${ex.drawings ?? 0} drawings`} />
                         )}
-                        <Kpi label="Rate band" value={`${v.user_rate_low} → ${v.user_rate_high}`} sub={rateUnit} />
+                        <Kpi label="Rate band" value={`${v.user_rate_low} → ${v.user_rate_high}`} sub={isFab ? `per ${tonUnit}` : rateUnit} />
                         <Kpi label="Estimate (mid)" value={v.grand_mid} sub={v.grand_range_text} />
                         {conf && (
                             <div className="border border-ink-line bg-white p-4">
@@ -358,7 +458,7 @@ export default function Estimation() {
                                 <table className="w-full text-sm">
                                     <thead className="bg-navy text-white">
                                         <tr>
-                                            {["Category", "Count", "Length (m)", "Weight (kg)", "Tons"].map((h) => (
+                                            {["Category", "Members (Σ Qty)", "Length (m)", "Weight (kg)", "Metric t"].map((h) => (
                                                 <th key={h} className="px-3 py-2 text-left font-heading text-[11px] uppercase tracking-wider">{h}</th>
                                             ))}
                                         </tr>
@@ -373,10 +473,28 @@ export default function Estimation() {
                                                 <td className="px-3 py-1.5 font-semibold">{c.tons?.toLocaleString()}</td>
                                             </tr>
                                         ))}
+                                        <tr className="border-t-2 border-ink-line bg-white font-semibold">
+                                            <td className="px-3 py-1.5 text-navy">Net member weight</td>
+                                            <td className="px-3 py-1.5">{cats.reduce((s, c) => s + (c.count || 0), 0).toLocaleString()}</td>
+                                            <td />
+                                            <td className="px-3 py-1.5">{Math.round(netKg).toLocaleString()}</td>
+                                            <td className="px-3 py-1.5">{(netKg / 1000).toFixed(3)}</td>
+                                        </tr>
+                                        {(ex.allowances || []).map((a, i) => (
+                                            <tr key={`al-${i}`} className="bg-background text-ink-muted">
+                                                <td className="px-3 py-1.5">+ {a.label} ({a.pct}%)</td>
+                                                <td colSpan={2} />
+                                                <td className="px-3 py-1.5">{Math.round(a.kg).toLocaleString()}</td>
+                                                <td className="px-3 py-1.5">{(a.kg / 1000).toFixed(3)}</td>
+                                            </tr>
+                                        ))}
                                         <tr className="border-t-2 border-gold bg-gold-pale/40 font-bold">
-                                            <td className="px-3 py-2 text-navy">PROJECT TOTAL</td>
-                                            <td colSpan={3} />
-                                            <td className="px-3 py-2 text-navy">{totalTons.toFixed(2)}</td>
+                                            <td className="px-3 py-2 text-navy">TOTAL FABRICATED</td>
+                                            <td colSpan={2} className="px-3 py-2 text-navy">
+                                                {ex.tonnage_short !== undefined ? `${Number(ex.tonnage_short).toFixed(2)} short tons` : ""}
+                                            </td>
+                                            <td className="px-3 py-2 text-navy">{Math.round(ex.gross_kg || netKg).toLocaleString()}</td>
+                                            <td className="px-3 py-2 text-navy">{Number(ex.tonnage_t ?? netKg / 1000).toFixed(3)}</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -415,7 +533,7 @@ export default function Estimation() {
                     {isFab && lineItems.length > 0 && (
                         <>
                             <SectionTitle>Itemized material take-off ({lineItems.length} line items)</SectionTitle>
-                            <div className="max-h-[420px] overflow-auto border border-ink-line">
+                            <div className="print-expand max-h-[420px] overflow-auto border border-ink-line">
                                 <table className="w-full text-xs">
                                     <thead className="sticky top-0 bg-navy text-white">
                                         <tr>
@@ -512,6 +630,12 @@ export default function Estimation() {
                         </div>
                     )}
 
+                    {ex.excluded_scope?.length > 0 && (
+                        <p className="mt-6 text-sm text-ink">
+                            <span className="font-semibold text-navy">Excluded: </span>
+                            {ex.excluded_scope.join("; ")}
+                        </p>
+                    )}
                     {ex.notes && (
                         <p className="mt-6 font-mono text-[11px] uppercase tracking-wider text-ink-muted">
                             Basis: {ex.notes} · Engine: {result?.engine || "STRUCTMIND CORE"}
@@ -519,6 +643,51 @@ export default function Estimation() {
                     )}
                 </div>
             )}
+
+            {/* ── HISTORY ── */}
+            <div className="no-print mt-12 border-t border-ink-line pt-6">
+                <h2 className="flex items-center gap-2 font-heading text-sm font-bold uppercase tracking-[0.2em] text-navy">
+                    <History size={14} className="text-gold" />
+                    Estimate history
+                </h2>
+                {history.length === 0 ? (
+                    <p className="mt-3 text-sm text-ink-muted">No estimates yet.</p>
+                ) : (
+                    <div className="mt-3 divide-y divide-ink-line border border-ink-line bg-white">
+                        {history.map((e) => (
+                            <div key={e.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                                <button onClick={() => openEstimate(e.id)} className="min-w-0 flex-1 text-left">
+                                    <div className="truncate text-sm font-semibold text-navy hover:text-gold">
+                                        {e.project_name || "Estimate"}
+                                    </div>
+                                    <div className="font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                                        {e.role} · {e.country} · {e.created_at ? new Date(e.created_at).toLocaleString() : ""}
+                                        {e.result?.visible?.final_amount ? ` · ${e.result.visible.final_amount}` : ""}
+                                    </div>
+                                </button>
+                                <span
+                                    className={`border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+                                        e.status === "failed"
+                                            ? "border-destructive text-destructive"
+                                            : e.status === "processing"
+                                              ? "border-gold text-navy"
+                                              : "border-success text-success"
+                                    }`}
+                                >
+                                    {e.status || "complete"}
+                                </span>
+                                <button
+                                    onClick={() => deleteEstimate(e.id)}
+                                    className="text-ink-muted hover:text-destructive"
+                                    aria-label="Delete estimate"
+                                >
+                                    <Trash2 size={14} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

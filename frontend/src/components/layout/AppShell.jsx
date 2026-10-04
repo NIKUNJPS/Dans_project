@@ -77,12 +77,12 @@ export function AppShell({ children }) {
     const isSuperAdmin = user?.role === "super_admin";
 
     return (
-        <div className="flex h-screen overflow-hidden bg-background text-ink">
+        <div className="app-shell flex h-screen overflow-hidden bg-background text-ink">
             {/* IMPERSONATION BANNER */}
             {impersonation && (
                 <div
                     data-testid="impersonation-banner"
-                    className="absolute left-0 right-0 top-0 z-50 flex items-center justify-between bg-destructive px-6 py-2 font-mono text-[11px] uppercase tracking-wider text-white"
+                    className="no-print absolute left-0 right-0 top-0 z-50 flex items-center justify-between bg-destructive px-6 py-2 font-mono text-[11px] uppercase tracking-wider text-white"
                 >
                     <div className="flex items-center gap-2">
                         <Lock size={12} />
@@ -104,7 +104,7 @@ export function AppShell({ children }) {
             {/* SIDEBAR */}
             <aside
                 data-testid="app-sidebar"
-                className={`flex w-[260px] flex-shrink-0 flex-col bg-navy text-white ${impersonation ? "mt-8" : ""}`}
+                className={`no-print flex w-[260px] flex-shrink-0 flex-col bg-navy text-white ${impersonation ? "mt-8" : ""}`}
             >
                 <div className="px-6 pt-8 pb-6">
                     <Logo variant="light" size="md" />
@@ -208,8 +208,8 @@ export function AppShell({ children }) {
             </aside>
 
             {/* MAIN */}
-            <div className={`flex min-w-0 flex-1 flex-col ${impersonation ? "mt-8" : ""}`}>
-                <header className="flex h-16 items-center justify-between border-b border-ink-line bg-white px-8">
+            <div className={`app-shell-body flex min-w-0 flex-1 flex-col ${impersonation ? "mt-8" : ""}`}>
+                <header className="no-print flex h-16 items-center justify-between border-b border-ink-line bg-white px-8">
                     <div className="relative w-full max-w-md">
                         <Search
                             size={16}
@@ -338,7 +338,7 @@ export function AppShell({ children }) {
                     </div>
                 </header>
 
-                <main className="flex-1 overflow-y-auto">{children}</main>
+                <main className="app-main flex-1 overflow-y-auto">{children}</main>
             </div>
         </div>
     );

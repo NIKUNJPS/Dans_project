@@ -1,4 +1,4 @@
-# StructMind AI · Runbook (v4.1.0)
+# StructMind AI · Runbook (v5.0.0)
 
 > Everything you need to run, configure, and deploy the platform end-to-end.
 
@@ -22,6 +22,11 @@ The 15 shared modes are stored as module-level constants in `detailer_prompts.py
 
 **To tweak any prompt:** open the corresponding constant in `detailer_prompts.py` (e.g. `MASTER_INTAKE = """..."""`), edit, restart backend (`sudo supervisorctl restart backend`). Super Admin → Permissions editor will immediately reflect the change.
 
+> **v5:** the MTO Engine and both Estimation Pro modes run on deterministic engines. Their prompts live
+> next to the code that parses them — `estimation/takeoff.py` (`takeoff_system_prompt`, used by MTO and
+> Fabricator Estimation Pro) and `estimation/detailing_estimate.py` (`detailing_system_prompt`, Detailer
+> Estimation Pro). The registry entries in `detailer_prompts.py` / `fabricator_prompts.py` point at them.
+
 **To add a brand-new mode:** add a new `NEW_MODE_NAME = """..."""` constant, then add an entry to the `DETAILER_MODES` dict (and the `FABRICATOR_MODES` dict if it should be shared). Restart backend.
 
 ---
@@ -33,7 +38,12 @@ The preview environment already has everything wired. For production, set these 
 |----------|---------|-----------------|
 | `MONGO_URL` | Mongo connection string | Mongo Atlas → cluster → Connect → Application |
 | `DB_NAME` | Mongo database name | Your choice (e.g. `structmind_prod`) |
-| `EMERGENT_LLM_KEY` | AI engine key | Already provisioned for your account |
+| `ANTHROPIC_API_KEY` | **Required.** Claude API key that runs every analysis | console.anthropic.com → API Keys |
+| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Defaults `claude-opus-5-5` → `claude-sonnet-5-5` | — |
+| `ANTHROPIC_EFFORT` | Optional. Reasoning depth, default `high` (`xhigh`/`max` = slower, deeper) | — |
+| `ANTHROPIC_SERVER_FALLBACK` | Optional, default `true`. Set `false` on Bedrock / Vertex / Foundry | — |
+| `BINDER_BATCH_PAGES` / `BINDER_BATCH_MB` | Optional. Page batch size, default 25 pages / 28 MB per Claude call | — |
+| `BATCH_CONCURRENCY` / `MAX_PARALLEL_CLAUDE_CALLS` | Optional. Batches read in parallel per analysis (4) and process-wide (8). Lower them if you hit API rate limits | — |
 | `JWT_SECRET` | JWT signing key | Generate: `python -c "import secrets;print(secrets.token_urlsafe(64))"` |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | First seeded super admin | Your choice |
 | `ADMIN_EMAIL_2` / `ADMIN_PASSWORD_2` | Second seeded super admin (optional) | Your choice |
@@ -80,8 +90,7 @@ git clone <your-repo-url> structmind && cd structmind
 # 2. Backend — Python 3.11+
 cd backend
 pip install -r requirements.txt
-pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
-cp .env.example .env       # fill in MONGO_URL, JWT_SECRET, EMERGENT_LLM_KEY, ADMIN_EMAIL/PASSWORD, SMTP_*
+cp .env.example .env       # fill in MONGO_URL, JWT_SECRET, ANTHROPIC_API_KEY, ADMIN_EMAIL/PASSWORD, SMTP_*
 # Start the server (uvicorn is in requirements)
 uvicorn server:app --host 0.0.0.0 --port 8001 --reload
 
@@ -108,14 +117,14 @@ The platform is preconfigured to deploy with **one click on Emergent**:
 1. Click **"Deploy"** (top-right of the Emergent chat).
 2. Pick a subdomain or attach your custom domain (Cloudflare DNS instructions are shown).
 3. Set the 4 required secrets in the deploy dialog: `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `SMTP_*`.
-4. Emergent provisions a Mongo Atlas cluster, sets `MONGO_URL` + `EMERGENT_LLM_KEY` automatically, and ships your build.
+4. Emergent provisions a Mongo Atlas cluster and sets `MONGO_URL` automatically — add your `ANTHROPIC_API_KEY` as a secret — then ships your build.
 5. First request seeds your super admin. Done.
 
 ### Option B — Self-host (Vercel + Render + Atlas)
 | Layer | Provider | Build command | Start command |
 |-------|----------|---------------|---------------|
 | Frontend | Vercel | `cd frontend && yarn install && yarn build` | (static) |
-| Backend | Render / Railway / Fly | `pip install -r requirements.txt && pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/` | `uvicorn server:app --host 0.0.0.0 --port $PORT` |
+| Backend | Render / Railway / Fly | `pip install -r requirements.txt` | `uvicorn server:app --host 0.0.0.0 --port $PORT` |
 | Database | Mongo Atlas | n/a | n/a |
 | File storage | Persistent disk on backend host (`/data/uploads`) | mount volume | `UPLOAD_DIR=/data/uploads` |
 
@@ -131,37 +140,18 @@ Click **"Save to Github"** in the Emergent chat input. You get a private repo wi
 ## PART 4 · How the AI estimation flow works (end-to-end)
 
 ```
-USER                       BACKEND                              GEMINI 2.5 PRO
-  │                            │                                       │
-  ├─ Upload drawing(s) ────────▶ POST /api/files/upload ───────┐       │
-  │                            │  (size cap + permission gate) │       │
-  │                       store on disk + Mongo (file_id)      │       │
-  │  ◀───────── file_id ───────┤                               │       │
-  │                            │                               │       │
-  ├─ Set LOW & HIGH rates      │                               │       │
-  ├─ Click "Analyse"           │                               │       │
-  │ ─ POST /api/estimation/ai-calculate ───────────────────────┘       │
-  │   { role, rate_low, rate_high, file_ids }                          │
-  │                       check perms (canRunEstimation, country, cap) │
-  │                       load files from disk                         │
-  │                       call STRUCTMIND CORE with role-specific      │
-  │                       JSON-extraction prompt + file_contents ─────▶│
-  │                                                            extracts:│
-  │                                                  Fabricator: tonnage│
-  │                                                Detailer: dwgs+cmplx │
-  │                       ◀────────────── structured JSON ──────────────│
-  │                       apply rate band:                              │
-  │                          • Fab: tonnage × rate × (1 + tax_pct)      │
-  │                          • Det: dwgs × rate × complexity_mult       │
-  │                       persist to estimates collection               │
-  │                       write audit_log entry                         │
-  │ ◀── { result.visible.grand_low / mid / high, ai_extracted, … } ────┤
-  │                                                                    │
-  ├─ Click "Download PDF" ──▶ GET /api/estimation/{eid}/pdf ───────────▶│
-  │ ◀── application/pdf ──────────────────────────────────────────────┤
+UI /estimate ── POST /api/estimation/ai-calculate {role, rate_low, rate_high, file_ids, country}
+                 → record saved with status "processing", background job starts, UI polls GET /api/estimation/{id}
+background job:  file_prep (Excel→CSV, Word→text) → binder.plan_binder (page batches)
+                 → pipeline.run_takeoff (Claude reads each batch in parallel; Python computes every weight)
+                   — or reuses the cached take-off the MTO Engine produced for the same files
+                 → engine.apply_band_to_extracted (tons × your LOW/HIGH band, per short ton in the USA)
+                 → status "complete" (or "failed" with the reason)
+UI ── GET /api/estimation/{id}/pdf → full PDF
 ```
 
-**Latency**: 8–25 seconds per AI call (depends on file size and Gemini load). Plan UX accordingly — the UI shows a "STRUCTMIND CORE is analysing your drawings…" indicator on the button while it works.
+**Latency**: a single 25-page batch takes a few minutes; a 300-page binder runs ~12 batches, 4 at a time.
+Progress is shown live ("Taking off members — batch 5 of 12").
 
 ---
 
@@ -195,7 +185,7 @@ Change these via env vars (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, etc.) before your re
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Login works but "/admin/users 403" | User role is detailer/fabricator, not super_admin | Re-seed via env vars or `db.users.updateOne({email}, {$set:{role:"super_admin"}})` |
-| AI estimate returns 502 | All Gemini fallback tiers failed | Check `EMERGENT_LLM_KEY` is set; check Emergent → Profile → Universal Key budget |
+| Analysis / estimate fails with "All STRUCTMIND CORE tiers failed" | Claude API errors after retries (invalid key, rate limit, outage) | Check `ANTHROPIC_API_KEY`, your Anthropic console usage limits, and lower `BATCH_CONCURRENCY` if the log shows 429 rate limits |
 | "No analysis modes enabled" empty state | Super admin hasn't enabled any modes for that user | Admin → Permissions → toggle modes in AI modes section |
 | OTP not arriving | Email provider not configured | Set `RESEND_API_KEY` (+ verified `SMTP_FROM`) in the backend env. With no provider the code logs the OTP to the backend console as a dev fallback; in production a failed send now returns a 502 so the user is told to retry rather than getting a silent "code sent". |
 | File upload returns 413 | User's `maxFileSizeMb` cap exceeded | Admin → Permissions → increase Max file size |
@@ -215,7 +205,10 @@ Change these via env vars (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, etc.) before your re
 │   ├── seed.py                         (super_admin seeding + legacy role migration)
 │   ├── db.py                           (Mongo client + indexes)
 │   ├── config.py                       (env loader)
-│   ├── gemini_service.py               (STRUCTMIND CORE main analysis runner)
+│   ├── claude_engine.py                (Claude API: Files API, streaming, continuation, model + refusal fallback)
+│   ├── binder.py                       (splits a multi-PDF binder into page batches + manifest)
+│   ├── pipeline.py                     (one binder in → ONE report out: take-off, estimates, map→consolidate)
+│   ├── pdf_repair.py                   (rewrite / rasterize tiers for PDFs Claude rejects)
 │   ├── middleware/permission_guard.py  (every feature gate lives here)
 │   ├── prompts/                        ◀── ★ YOU PASTE YOUR PROMPTS HERE
 │   │   ├── shared_rules.py
@@ -232,7 +225,12 @@ Change these via env vars (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, etc.) before your re
 │   │   ├── estimation.py               (AI + legacy paths)
 │   │   └── platform.py                 (notifications, usage, dashboard stats)
 │   └── estimation/
-│       ├── ai_extract.py               (calls Gemini, parses JSON extraction)
+│       ├── weights.py                  (unit weights from designation / section geometry, length parser, joist filter)
+│       ├── takeoff.py                  (take-off prompt, parsing, consolidation, MTO report)
+│       ├── fab_estimate.py             (Fabricator Estimation Pro — tonnage × rate band × factors × tax)
+│       ├── detailing_estimate.py       (Detailer Estimation Pro — piece-count hours, buffer, confidential cost)
+│       ├── tonnage.py                  (take-off lock shared by MTO / estimation for the same drawing set)
+│       ├── ai_extract.py               (estimate-page adapter over the pipeline)
 │       ├── engine.py                   (deterministic + apply_band_to_extracted)
 │       ├── rates.py                    (country/currency table)
 │       ├── sanity.py                   (estimate sanity check)
@@ -320,3 +318,64 @@ Files: `backend/cleanup.py` (new), `routes/projects.py`, `server.py`, `config.py
 `backend/tests/test_estimation_engine.py` — offline unit tests (no server/Mongo needed)
 covering weight lookup, the take-off parser, weight reconciliation, the cost build-up,
 confidence banding and the cleanup date logic. Run: `pytest tests/test_estimation_engine.py`.
+
+
+---
+
+## PART 10 · v5.0 — Binder-scale accuracy, one report, history & print
+
+### ① Tonnage is now an exact calculation (MTO Engine, Estimation, Estimate page)
+- Claude reads the drawings and reports every piece (profile, Qty, printed length, sheet, method).
+  **Python computes every number**: length from the printed dimension, unit weight, weight =
+  Qty × Length × kg/m, **member count = Σ Qty**, category / role roll-ups, allowances and tonnage.
+- Unit weights come from the profile itself — rolled shapes from the designation (W12x26 = 26 lb/ft,
+  W310x52 = 52 kg/m, 310UB46.2 = 46.2 kg/m) and HSS / pipe / angles / plates from section geometry on
+  nominal wall at 7,850 kg/m³. Verified against AISC / CISC / OneSteel tables within ±1.5 %.
+  (The previous hard-coded HSS, angle and pipe tables were 20-45 % low.)
+- A piece shown on a schedule/shop drawing AND counted on a plan in another part of the binder is
+  counted **once** (logged in the reconciliation register). Model arithmetic that disagrees with the
+  computed weight by > 3 % is flagged for review; computed weights are always used.
+- Allowances are shown as separate lines: bolts & weld metal 3 %, plus 5 % connection material when
+  connections are not detailed on the drawings.
+- **Joists removed**: open-web steel joists, joist girders and joist bridging (SJI K/LH/DLH/SLH/KCS,
+  OWSJ) are never taken off, counted, priced or put in scope registers — one exclusion line only.
+- USA pricing is per **short ton (2,000 lb)**; Canada / Australia per **tonne**. Reports show both.
+- MTO, Fabricator Estimation Pro and the Estimate page share one cached take-off per drawing set, so
+  they always report the same tonnage. Running (or re-running) the MTO Engine refreshes it.
+- Both Estimation Pro modes compute their manifests deterministically — every section agrees to the
+  dollar / hour by construction. Detailer rates stay `[CONFIDENTIAL]`.
+
+### ② 50 MB+ binders, processed in page batches, ONE report
+- Every PDF is split by PAGE (`BINDER_BATCH_PAGES`, default 25) and packed in binder order; batches are
+  read in parallel. Each call is told the whole binder manifest and which pages it holds.
+- MTO / estimates: batch rows are consolidated in Python. All other modes (Master Intake, Issue Detector,
+  Drawing Checker, …): a consolidation call writes the single deliverable — large registers are merged
+  losslessly in Python, RFI ids renumbered across the document. No "batch" artefacts reach the client.
+- A binder that fits one batch is analysed in a single call. A PDF Claude rejects is isolated (bisected)
+  and repaired (rewrite → rasterize) without failing the rest of the binder.
+- Live progress ("Taking off members — batch 5 of 8") on the report page, project page and Reports list.
+  The Estimate page now runs as a background job (no gateway time-outs on large binders).
+
+### ③ Claude engine
+- Default `claude-opus-5-5` (adaptive thinking, effort `high`, 128K streamed output), fallback
+  `claude-sonnet-5-5`, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
+  the system prompt and drawings. SDK pinned: `anthropic==1.11.0` (requires `idna>=3.18`).
+
+### ④ History & print
+- Delete one report (report page / project page / Reports list), **Clear history** for a project
+  (reports + estimates; drawings kept), **Clear quick-analysis history**, delete estimates, delete files,
+  and permanently delete a project. Report exports on disk are removed with the report.
+- **Print** on every report and on the Estimate page: no app chrome, every table fully expanded,
+  A4 landscape. API: `POST /api/analyses/bulk-delete` with `{ids}` | `{project_id}` | `{scope:"quick"}`.
+
+### ⑤ Prompts
+- One missing-data convention (em-dash + RFI unless a mode defines its own token), no 7-column cap,
+  tri-jurisdiction fabricator persona, executive snapshot at the top of both Master Intakes, verified
+  unit-weight reference in Drawing Checker / Phase 3, joists removed from every scope list.
+
+### ⑥ Tests (offline — no server, Mongo or API key)
+```
+cd backend
+pytest tests/test_estimation_engine.py tests/test_binder_pipeline.py tests/test_routes_offline.py
+```
+`test_routes_offline.py` needs `mongomock-motor` (dev only) and drives the real FastAPI routes with Claude stubbed.
