@@ -214,3 +214,87 @@ code,
         display: contents !important;
     }
 }
+
+/* ── Print: full report on paper, no app chrome ─────────────────────────── */
+.print-only {
+    display: none;
+}
+
+@media print {
+    @page {
+        size: A4 landscape;
+        margin: 12mm 10mm;
+    }
+    html,
+    body,
+    #root {
+        height: auto !important;
+        background: #fff !important;
+    }
+    body {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+        font-size: 10pt;
+    }
+    .no-print,
+    [data-sonner-toaster] {
+        display: none !important;
+    }
+    .print-only {
+        display: block !important;
+    }
+    .app-shell,
+    .app-shell-body,
+    .app-main {
+        display: block !important;
+        height: auto !important;
+        overflow: visible !important;
+        margin: 0 !important;
+    }
+    .print-expand,
+    .print-expand * {
+        max-height: none !important;
+        overflow: visible !important;
+    }
+    .print-full {
+        grid-column: 1 / -1 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+    .card-steel {
+        box-shadow: none !important;
+        break-inside: auto;
+    }
+    .print-section {
+        break-before: auto;
+        break-inside: auto;
+        margin-top: 0 !important;
+    }
+    .print-section h2,
+    .print-section .section-title {
+        break-after: avoid;
+    }
+    table {
+        font-size: 8pt;
+        border-collapse: collapse;
+    }
+    thead {
+        display: table-header-group;
+    }
+    tr,
+    td,
+    th {
+        break-inside: avoid;
+    }
+    th,
+    td {
+        padding: 2px 4px !important;
+    }
+    .sticky {
+        position: static !important;
+    }
+    a {
+        color: inherit !important;
+        text-decoration: none !important;
+    }
+}

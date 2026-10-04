@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
     AlertOctagon,
     ChevronRight,
     Download,
+    Layers,
     MessageSquarePlus,
+    Printer,
     RotateCw,
     Sparkles,
+    Trash2,
 } from "lucide-react";
 import { api, errMessage } from "@/lib/api";
 import { toast } from "sonner";
@@ -20,6 +23,11 @@ const STAGE_LABELS = {
     complete: "Complete",
     failed: "Failed",
 };
+
+const fmtNum = (v, d = 0) =>
+    v === null || v === undefined || Number.isNaN(Number(v))
+        ? "—"
+        : Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
 
 const EXPORTS = [
     { fmt: "docx", label: "Word" },
@@ -70,7 +78,7 @@ function MarkdownBlock({ body }) {
         const flushTable = () => {
             if (tbl) {
                 out.push(
-                    `<div class="my-4 max-h-[75vh] overflow-auto border border-ink-line"><div class="px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-ink-muted bg-background border-b border-ink-line sticky top-0 z-20">${tbl.rows.length.toLocaleString()} rows</div><table class="w-full text-left text-xs"><thead class="sticky top-[26px] z-10 bg-navy text-white"><tr>${tbl.header
+                    `<div class="print-expand my-4 max-h-[75vh] overflow-auto border border-ink-line"><div class="no-print px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-ink-muted bg-background border-b border-ink-line sticky top-0 z-20">${tbl.rows.length.toLocaleString()} rows</div><table class="w-full text-left text-xs"><thead class="sticky top-[26px] z-10 bg-navy text-white"><tr>${tbl.header
                         .map(
                             (h) =>
                                 `<th class="border-r border-white/10 px-3 py-2 font-heading text-xs uppercase tracking-wider">${inline(h)}</th>`,
@@ -150,6 +158,14 @@ function MarkdownBlock({ body }) {
                 continue;
             }
             flushList();
+            if (/^\**\s*(Table|Caption):/i.test(trim)) {
+                out.push(
+                    `<div class="mt-5 font-mono text-[11px] font-semibold uppercase tracking-wider text-gold">${inline(
+                        trim.replace(/^\**\s*(Table|Caption):\s*/i, "").replace(/\*+$/, ""),
+                    )}</div>`,
+                );
+                continue;
+            }
             out.push(`<p class="text-sm leading-relaxed text-ink">${inline(trim)}</p>`);
         }
         flushList();
@@ -166,7 +182,9 @@ function MarkdownBlock({ body }) {
 
 export default function AnalysisReport() {
     const { id } = useParams();
+    const nav = useNavigate();
     const [analysis, setAnalysis] = useState(null);
+    const [deleting, setDeleting] = useState(false);
     const [loading, setLoading] = useState(true);
     const [polling, setPolling] = useState(false);
     const [rfiOpen, setRfiOpen] = useState(false);
@@ -215,6 +233,26 @@ export default function AnalysisReport() {
             toast.error(errMessage(e));
         }
     };
+
+    const deleteAnalysis = async () => {
+        if (
+            !window.confirm(
+                "Delete this report permanently? Its exports are removed too. This cannot be undone.",
+            )
+        )
+            return;
+        setDeleting(true);
+        try {
+            await api.delete(`/api/analyses/${id}`);
+            toast.success("Report deleted");
+            nav(analysis?.project_id ? `/projects/${analysis.project_id}` : "/outputs");
+        } catch (e) {
+            toast.error(errMessage(e));
+            setDeleting(false);
+        }
+    };
+
+    const printReport = () => window.print();
 
     const downloadExport = async (fmt) => {
         try {
@@ -271,10 +309,20 @@ export default function AnalysisReport() {
     return (
         <div className="min-h-full bg-background">
             <div className="border-b border-ink-line bg-white px-10 py-8">
-                <nav className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
-                    <Link to="/outputs" className="hover:text-navy">Outputs</Link>
+                <nav className="no-print mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                    {analysis.project_id ? (
+                        <>
+                            <Link to="/projects" className="hover:text-navy">Projects</Link>
+                            <ChevronRight size={12} />
+                            <Link to={`/projects/${analysis.project_id}`} className="hover:text-navy">
+                                {analysis.project_name || "Project"}
+                            </Link>
+                        </>
+                    ) : (
+                        <Link to="/outputs" className="hover:text-navy">Reports</Link>
+                    )}
                     <ChevronRight size={12} />
-                    <span className="text-navy">{analysis.project_name || analysis.mode_label}</span>
+                    <span className="text-navy">{analysis.mode_label}</span>
                 </nav>
 
                 <div className="flex flex-wrap items-end justify-between gap-6">
@@ -284,6 +332,7 @@ export default function AnalysisReport() {
                             {analysis.project_name || analysis.mode_label}
                         </h1>
                         <div className="mt-3 flex flex-wrap items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                            <span className="print-only">STRUCTMIND AI · {analysis.mode_label}</span>
                             <span>Status: <span className="text-navy">{STAGE_LABELS[analysis.status]}</span></span>
                             {analysis.model_used && <span>Model: <span className="text-navy">{analysis.model_used}</span></span>}
                             {analysis.processing_time_seconds ? (
@@ -292,10 +341,28 @@ export default function AnalysisReport() {
                             {analysis.completed_at && (
                                 <span>Completed: <span className="text-navy">{new Date(analysis.completed_at).toLocaleString()}</span></span>
                             )}
+                            {analysis.binder?.total_pages ? (
+                                <span>
+                                    Binder: <span className="text-navy">{analysis.binder.documents?.length || 0} docs · {analysis.binder.total_pages} pages</span>
+                                </span>
+                            ) : null}
+                            {analysis.blockchain_hash && (
+                                <span className="print-only">SHA-256 {analysis.blockchain_hash.slice(0, 16)}…</span>
+                            )}
                         </div>
                     </div>
 
-                    <div className="flex flex-wrap gap-2">
+                    <div className="no-print flex flex-wrap gap-2">
+                        {analysis.status === "complete" && (
+                            <button
+                                onClick={printReport}
+                                data-testid="print-report-btn"
+                                className="btn-ghost-navy"
+                            >
+                                <Printer size={14} />
+                                Print
+                            </button>
+                        )}
                         <button
                             onClick={() => setRfiOpen(true)}
                             data-testid="create-rfi-btn"
@@ -312,6 +379,15 @@ export default function AnalysisReport() {
                             <RotateCw size={14} />
                             Re-run
                         </button>
+                        <button
+                            onClick={deleteAnalysis}
+                            disabled={deleting}
+                            data-testid="delete-analysis-btn"
+                            className="inline-flex items-center gap-2 border border-destructive bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white disabled:opacity-50"
+                        >
+                            <Trash2 size={14} />
+                            {deleting ? "Deleting…" : "Delete"}
+                        </button>
                     </div>
                 </div>
             </div>
@@ -325,14 +401,39 @@ export default function AnalysisReport() {
                             Running · {analysis.mode_label}
                         </div>
                         <p className="mt-2 text-sm text-ink-muted">
-                            {polling
-                                ? "Live-polling backend every 2.5s. Hold tight — this is usually quick."
-                                : "Queued."}
+                            {analysis.progress?.label
+                                ? `${analysis.progress.label}${
+                                      analysis.progress.total > 1
+                                          ? ` — batch ${Math.min(analysis.progress.done + 1, analysis.progress.total)} of ${analysis.progress.total}`
+                                          : ""
+                                  }`
+                                : polling
+                                  ? "Preparing the binder…"
+                                  : "Queued."}
                         </p>
+                        {analysis.progress?.total > 0 && (
+                            <div className="mt-5">
+                                <div className="h-2 w-full border border-ink-line bg-background">
+                                    <div
+                                        className="h-full bg-gold transition-all duration-700"
+                                        style={{
+                                            width: `${Math.max(
+                                                4,
+                                                Math.round((100 * (analysis.progress.done || 0)) / analysis.progress.total),
+                                            )}%`,
+                                        }}
+                                    />
+                                </div>
+                                <div className="mt-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                                    Large binders are read in page batches in parallel and consolidated into one report.
+                                </div>
+                            </div>
+                        )}
                         <div className="mt-8 grid grid-cols-4 gap-0 border border-ink-line">
-                            {["queued", "processing", "finalising", "complete"].map((s, i) => {
+                            {["queued", "reading", "consolidating", "complete"].map((s, i) => {
+                                const consolidating = /consolidat|computing/i.test(analysis.progress?.label || "");
                                 const done =
-                                    (analysis.status === "processing" && i <= 1) ||
+                                    (analysis.status === "processing" && (i <= 1 || (i === 2 && consolidating))) ||
                                     (analysis.status === "complete" && i <= 3);
                                 return (
                                     <div
@@ -374,8 +475,10 @@ export default function AnalysisReport() {
 
             {analysis.status === "complete" && (
                 <div className="container-steel py-10">
+                    <ReportSummary analysis={analysis} />
+
                     {/* Exports + Blockchain */}
-                    <div className="card-steel p-6">
+                    <div className="no-print card-steel mt-6 p-6">
                         <div className="flex flex-wrap items-center justify-between gap-4">
                             <div>
                                 <div className="text-overline">Exports</div>
@@ -402,7 +505,7 @@ export default function AnalysisReport() {
 
                     {/* Sections */}
                     <div className="mt-6 grid gap-6 lg:grid-cols-4">
-                        <aside className="lg:col-span-1">
+                        <aside className="no-print lg:col-span-1">
                             <div className="sticky top-6 card-steel p-4">
                                 <div className="text-overline mb-3">Contents</div>
                                 <ul className="space-y-1">
@@ -419,19 +522,19 @@ export default function AnalysisReport() {
                                 </ul>
                             </div>
                         </aside>
-                        <div className="lg:col-span-3 space-y-6">
+                        <div className="print-full lg:col-span-3 space-y-6">
                             {sections.map((s, i) => (
                                 <section
                                     key={s.id}
                                     id={`sec-${s.id}`}
-                                    className="card-steel p-6"
+                                    className="print-section card-steel p-6"
                                 >
                                     <div className="flex items-center justify-between border-b border-ink-line pb-3">
                                         <div className="flex items-center gap-3">
                                             <div className="font-mono text-xs uppercase tracking-wider text-gold">
                                                 {String(i + 1).padStart(2, "0")}
                                             </div>
-                                            <div className="font-heading text-xl font-bold uppercase tracking-tight text-navy">
+                                            <div className="section-title font-heading text-xl font-bold uppercase tracking-tight text-navy">
                                                 {s.title}
                                             </div>
                                         </div>
@@ -449,7 +552,7 @@ export default function AnalysisReport() {
             {/* RFI Modal */}
             {rfiOpen && (
                 <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-navy/60 px-4"
+                    className="no-print fixed inset-0 z-50 flex items-center justify-center bg-navy/60 px-4"
                     onClick={() => setRfiOpen(false)}
                 >
                     <div
@@ -523,6 +626,88 @@ export default function AnalysisReport() {
                             </button>
                         </div>
                     </div>
+                </div>
+            )}
+        </div>
+    );
+}
+function SummaryTile({ label, value, sub }) {
+    return (
+        <div className="border border-ink-line bg-white p-4">
+            <div className="border-t-2 border-gold pt-1 font-mono text-[10px] uppercase tracking-[0.2em] text-ink-muted">
+                {label}
+            </div>
+            <div className="mt-1 font-heading text-2xl font-bold text-navy">{value}</div>
+            {sub && (
+                <div className="mt-0.5 font-mono text-[10px] uppercase tracking-wider text-ink-muted">{sub}</div>
+            )}
+        </div>
+    );
+}
+
+function ReportSummary({ analysis }) {
+    const t = analysis.takeoff_summary;
+    const e = analysis.estimate_summary;
+    const b = analysis.binder;
+    if (!t && !e && !b) return null;
+    const usa = (t?.jurisdiction || "USA") === "USA";
+    const tiles = [];
+    if (b?.total_pages) {
+        tiles.push(
+            <SummaryTile
+                key="binder"
+                label="Binder reviewed"
+                value={`${fmtNum(b.total_pages)} pages`}
+                sub={`${b.documents?.length || 0} documents · ${fmtNum(b.total_mb, 1)} MB`}
+            />,
+        );
+    }
+    if (t) {
+        tiles.push(
+            <SummaryTile
+                key="tons"
+                label="Fabricated tonnage"
+                value={usa ? `${fmtNum(t.gross_short_tons, 2)} sh tons` : `${fmtNum(t.gross_t, 2)} t`}
+                sub={usa ? `${fmtNum(t.gross_t, 2)} metric t · ${fmtNum(t.gross_kg)} kg` : `${fmtNum(t.gross_short_tons, 2)} short tons · ${fmtNum(t.gross_kg)} kg`}
+            />,
+            <SummaryTile
+                key="pcs"
+                label="Members (Σ Qty)"
+                value={fmtNum(t.pieces)}
+                sub={`${fmtNum(t.line_items)} line items · ${fmtNum(t.sheets)} sheets`}
+            />,
+            <SummaryTile key="rfi" label="Open RFIs" value={fmtNum(t.rfis)} sub="tracked in the RFI package" />,
+        );
+    }
+    if (e?.lock) {
+        const sym = e.currency === "USD" ? "$" : `${e.currency} `;
+        tiles.push(
+            <SummaryTile
+                key="est"
+                label="Estimate (mid, inc. tax)"
+                value={`${sym}${fmtNum(e.lock.mid)}`}
+                sub={`${sym}${fmtNum(e.lock.low)} – ${sym}${fmtNum(e.lock.high)}`}
+            />,
+        );
+    }
+    if (e?.lock_hrs_low !== undefined) {
+        tiles.push(
+            <SummaryTile
+                key="hrs"
+                label="Detailing hours"
+                value={`${fmtNum(e.lock_hrs_low)} – ${fmtNum(e.lock_hrs_high)}`}
+                sub={`${e.currency} ${fmtNum(e.lock_cost_low)} – ${fmtNum(e.lock_cost_high)}`}
+            />,
+        );
+    }
+    if (!tiles.length) return null;
+    return (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {tiles}
+            {b?.batches > 1 && (
+                <div className="no-print col-span-full flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                    <Layers size={12} className="text-gold" />
+                    Read in {b.batches} page batches · consolidated into this single report
                 </div>
             )}
         </div>
