@@ -1,10 +1,10 @@
-"""Project tonnage lock.
+"""Project take-off lock — one take-off per drawing set, shared by every consumer.
 
-The tonnage for a drawing-set is extracted ONCE and cached, so every consumer —
-Master Intake, the MTO Engine and Estimation — reports the identical figure.
-
-The cache is keyed by the drawing-set (the sorted file ids), not by an individual
-analysis, so two different modes run against the same files share one locked value.
+The MTO Engine, Fabricator Estimation Pro and the AI estimate page all price the SAME
+take-off for the same files, so they can never report different tonnages. The cache is
+keyed by the drawing set (sorted file ids), not by an analysis. Running the MTO Engine
+(or re-running it) refreshes the lock; the estimators reuse the latest lock when one
+exists and create it otherwise.
 """
 from __future__ import annotations
 
@@ -13,61 +13,45 @@ from datetime import datetime, timezone
 
 from db import get_db
 from security import sha256_hex
-from estimation.ai_extract import extract_quantities
 
 logger = logging.getLogger(__name__)
 
+# Bump when the take-off schema changes so stale locks are recomputed, not mis-read.
+TAKEOFF_VERSION = 2
 
-def _key(file_ids: list[str]) -> str:
+
+def lock_key(file_ids: list[str]) -> str:
     return sha256_hex("|".join(sorted(file_ids)))
 
 
-async def get_or_lock_tonnage(
-    file_ids: list[str],
-    file_pairs: list[tuple[str, str]],
-    session_id: str,
-    country_code: str = "USA",
-) -> dict | None:
-    """Return the locked tonnage for this drawing-set, extracting + caching once.
+class TakeoffCache:
+    """Async get/put used by pipeline.run_mode()."""
 
-    Returns ``{"tonnage": float, "extracted": dict, "engine": str}`` or ``None`` when
-    no usable tonnage could be determined (e.g. detailing-only packages).
-    """
-    if not file_ids or not file_pairs:
+    def __init__(self, file_ids: list[str]):
+        self.file_ids = sorted(file_ids or [])
+        self.key = lock_key(self.file_ids)
+
+    async def get(self) -> dict | None:
+        if not self.file_ids:
+            return None
+        doc = await get_db().tonnage_locks.find_one({"id": self.key}, {"_id": 0})
+        if doc and doc.get("version") == TAKEOFF_VERSION and doc.get("takeoff"):
+            return doc["takeoff"]
         return None
 
-    db = get_db()
-    key = _key(file_ids)
-
-    existing = await db.tonnage_locks.find_one({"id": key})
-    if existing and existing.get("tonnage"):
-        return {
-            "tonnage": existing["tonnage"],
-            "extracted": existing.get("extracted", {}),
-            "engine": existing.get("engine", "STRUCTMIND CORE"),
+    async def put(self, takeoff: dict) -> None:
+        if not self.file_ids:
+            return
+        doc = {
+            "id": self.key,
+            "version": TAKEOFF_VERSION,
+            "file_ids": self.file_ids,
+            "tonnage": takeoff.get("totals", {}).get("gross_t", 0),
+            "takeoff": takeoff,
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
-
-    try:
-        extracted, engine = await extract_quantities(
-            role="fabricator", session_id=session_id, file_paths=file_pairs,
-            country_code=country_code,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("tonnage_lock_extract_failed key=%s error=%s", key, exc)
-        return None
-
-    tonnage = float(extracted.get("tonnage", 0) or 0)
-    if tonnage <= 0:
-        return None
-
-    doc = {
-        "id": key,
-        "tonnage": round(tonnage, 2),
-        "extracted": extracted,
-        "engine": engine,
-        "file_ids": sorted(file_ids),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    await db.tonnage_locks.update_one({"id": key}, {"$set": doc}, upsert=True)
-    logger.info("tonnage_locked key=%s tonnage=%.2f", key, doc["tonnage"])
-    return {"tonnage": doc["tonnage"], "extracted": extracted, "engine": engine}
+        try:
+            await get_db().tonnage_locks.update_one({"id": self.key}, {"$set": doc}, upsert=True)
+            logger.info("takeoff_locked key=%s t=%.3f", self.key, doc["tonnage"])
+        except Exception as exc:  # noqa: BLE001 — a cache write must never fail the analysis
+            logger.warning("takeoff_lock_write_failed key=%s error=%s", self.key, exc)

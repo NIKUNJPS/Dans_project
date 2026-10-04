@@ -11,8 +11,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+
+import logging
+import shutil
+import tempfile
 
 from config import settings
 from db import get_db
@@ -20,7 +24,7 @@ from estimation.ai_extract import extract_quantities
 from estimation.engine import CALCULATORS, apply_band_to_extracted, calculate
 from estimation.pdf import render_pdf
 from estimation.rates import supported_countries
-from estimation.tonnage import get_or_lock_tonnage
+from file_prep import prepare_file
 from middleware.permission_guard import (
     audit_log,
     check_country,
@@ -29,6 +33,7 @@ from middleware.permission_guard import (
 )
 from security import block_write_if_readonly, get_current_user, sha256_hex
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/estimation", tags=["estimation"])
 
 
@@ -88,6 +93,7 @@ async def schema_for_role(role: str, user=Depends(get_current_user)):
 async def ai_calculate(
     payload: dict,
     request: Request,
+    background: BackgroundTasks,
     user=Depends(get_current_user),
     perms: dict = Depends(load_permissions),
 ):
@@ -134,87 +140,89 @@ async def ai_calculate(
     if not file_docs:
         raise HTTPException(status_code=404, detail="None of the uploaded files were found.")
 
-    file_pairs: list[tuple[str, str]] = []
-    for f in file_docs:
-        path = Path(settings.upload_dir) / f["storage_key"]
-        if path.exists() and f.get("mime_type") in {
-            "application/pdf", "text/plain", "text/csv",
-            "image/png", "image/jpeg", "image/webp",
-        }:
-            file_pairs.append((str(path), f["mime_type"]))
+    # Keep the user's upload order so the binder reads in sequence.
+    order = {fid: i for i, fid in enumerate(file_ids)}
+    file_docs.sort(key=lambda f: order.get(f["id"], 1_000_000))
 
-    if not file_pairs:
+    scratch = Path(tempfile.mkdtemp(prefix="est_prep_"))
+    files: list[tuple[str, str, str]] = []
+    for f in file_docs:
+        pair, _status = prepare_file(f, Path(settings.upload_dir), scratch)
+        if pair:
+            files.append((pair[0], pair[1], f.get("original_name") or f["storage_key"]))
+
+    if not files:
+        shutil.rmtree(scratch, ignore_errors=True)
         raise HTTPException(
             status_code=415,
-            detail="Uploaded files are not in a supported format for AI analysis. Supported: PDF, PNG, JPG, WEBP, TXT, CSV.",
+            detail="Uploaded files are not in a supported format for AI analysis. Supported: PDF, images, "
+                   "Excel, Word, CSV/TXT and text-based fabrication files (export CAD/BIM to PDF).",
         )
 
-    # Run extraction. Fabricator tonnage is shared via the project tonnage lock so the
-    # estimate matches the tonnage reported by Master Intake / MTO Engine for the same files.
-    now = datetime.now(timezone.utc).isoformat()
-    session_id = sha256_hex(f"est-ai:{user['id']}:{role}:{now}")[:24]
-    try:
-        if role == "fabricator":
-            lock = await get_or_lock_tonnage(
-                [f["id"] for f in file_docs], file_pairs, session_id,
-                country_code=country,
-            )
-            if not lock:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Could not extract a usable tonnage from the uploaded drawings.",
-                )
-            extracted, engine = lock["extracted"], lock["engine"]
-        else:
-            extracted, engine = await extract_quantities(
-                role=role, session_id=session_id, file_paths=file_pairs,
-                country_code=country,
-            )
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Extraction failed: {e}")
-
-    # Apply rate band
-    try:
-        result = apply_band_to_extracted(
-            role=role,
-            extracted=extracted,
-            rate_low=rate_low,
-            rate_high=rate_high,
-            country_code=country,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-
-    # Auto-derive a project name from the first file if user didn't provide one
     if not project_name and file_docs:
         first = file_docs[0].get("original_name") or "Estimate"
         project_name = f"Estimate · {first[:60]}"
 
+    # The take-off for a full binder takes minutes, so it runs in the background and the
+    # client polls GET /api/estimation/{id} until status is "complete" (or "failed").
+    now = datetime.now(timezone.utc).isoformat()
+    session_id = sha256_hex(f"est-ai:{user['id']}:{role}:{now}")[:24]
     record = {
         "id": sha256_hex(f"est-ai:{user['id']}:{session_id}")[:24],
         "user_id": user["id"],
         "role": role,
         "country": country,
         "project_name": project_name,
+        "project_id": payload.get("project_id") or None,
         "file_ids": [f["id"] for f in file_docs],
-        "inputs": {
-            "rate_low":  rate_low,
-            "rate_high": rate_high,
-            "extracted": extracted,
-        },
-        "result": result,
-        "engine": engine,
+        "inputs": {"rate_low": rate_low, "rate_high": rate_high},
+        "status": "processing",
+        "result": None,
+        "engine": "",
+        "error_message": "",
         "created_at": now,
     }
     await db.estimates.insert_one(record)
     await audit_log(
         user["id"], "estimation.ai_calculate", "estimate", record["id"], request,
-        extra={"role": role, "country": country, "files": len(file_pairs)},
+        extra={"role": role, "country": country, "files": len(files)},
+    )
+    background.add_task(
+        _run_ai_estimate, record["id"], role, session_id, files, record["file_ids"],
+        country, rate_low, rate_high, str(scratch),
     )
     record.pop("_id", None)
     return record
+
+
+async def _run_ai_estimate(eid: str, role: str, session_id: str, files: list, file_ids: list[str],
+                           country: str, rate_low: float, rate_high: float, scratch: str) -> None:
+    db = get_db()
+
+    async def progress(label: str, done: int, total: int) -> None:
+        await db.estimates.update_one({"id": eid}, {"$set": {"progress": {"label": label, "done": done, "total": total}}})
+
+    try:
+        extracted, engine = await extract_quantities(
+            role=role, session_id=session_id, files=files, file_ids=file_ids, country_code=country,
+            progress=progress,
+        )
+        result = apply_band_to_extracted(
+            role=role, extracted=extracted, rate_low=rate_low, rate_high=rate_high, country_code=country,
+        )
+        await db.estimates.update_one({"id": eid}, {"$set": {
+            "status": "complete", "result": result, "engine": engine,
+            "inputs.extracted": extracted,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }})
+    except Exception as e:  # noqa: BLE001
+        logger.exception("ai_estimate_failed id=%s", eid)
+        await db.estimates.update_one({"id": eid}, {"$set": {
+            "status": "failed", "error_message": f"Extraction failed: {e}",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }})
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 # ─── DETERMINISTIC CALCULATE (KEPT FOR API / POWER USERS) ────────────────
@@ -279,7 +287,8 @@ async def post_calculate(
 async def list_estimates(user=Depends(get_current_user)):
     db = get_db()
     q = {} if user["role"] == "super_admin" else {"user_id": user["id"]}
-    items = await db.estimates.find(q, {"_id": 0}).sort("created_at", -1).to_list(100)
+    projection = {"_id": 0, "inputs.extracted": 0, "result.visible.line_items": 0, "result.meta": 0}
+    items = await db.estimates.find(q, projection).sort("created_at", -1).to_list(100)
     return {"items": items}
 
 
@@ -309,6 +318,11 @@ async def download_pdf(
         raise HTTPException(status_code=403, detail="Access denied")
     if user["role"] != "super_admin":
         check_feature(perms, "canDownloadReports")
+
+    if e.get("status") == "processing":
+        raise HTTPException(status_code=409, detail="The estimate is still being calculated.")
+    if e.get("status") == "failed":
+        raise HTTPException(status_code=409, detail=e.get("error_message") or "The estimate failed.")
 
     # AI-driven records already store the full result; deterministic ones recompute.
     full_result = e.get("result")

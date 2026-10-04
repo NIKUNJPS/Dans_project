@@ -311,7 +311,12 @@ def apply_band_to_extracted(
         rate_low, rate_high = rate_high, rate_low
 
     if role == "fabricator":
-        tonnage = float(extracted.get("tonnage", 0) or 0)
+        # US fabricators price per short ton (2,000 lb); everyone else per tonne (1,000 kg).
+        per_short_ton = (country_code or "USA").upper() == "USA"
+        tonnage_t = float(extracted.get("tonnage_t") or extracted.get("tonnage") or 0)
+        tonnage_short = float(extracted.get("tonnage_short") or (tonnage_t * 1000.0 / 907.18474))
+        tonnage = tonnage_short if per_short_ton else tonnage_t
+        ton_unit = "short ton" if per_short_ton else "tonne"
         if tonnage <= 0:
             raise ValueError("AI could not extract a usable tonnage from the drawings.")
         subtotal_low  = tonnage * rate_low
@@ -335,6 +340,14 @@ def apply_band_to_extracted(
             "visible": {
                 "extracted": {
                     "tonnage":          _round(tonnage),
+                    "ton_unit":         ton_unit,
+                    "tonnage_t":        _round(tonnage_t),
+                    "tonnage_short":    _round(tonnage_short),
+                    "net_kg":           extracted.get("net_kg"),
+                    "gross_kg":         extracted.get("gross_kg"),
+                    "allowances":       extracted.get("allowances", []),
+                    "line_item_count":  extracted.get("line_item_count", len(extracted.get("line_items", []))),
+                    "excluded_scope":   extracted.get("excluded_scope", []),
                     "member_tonnage":   extracted.get("member_tonnage", _round(tonnage)),
                     "accessory_allowance_pct": extracted.get("accessory_allowance_pct", 3.0),
                     "members_counted":  extracted.get("members_counted", 0),
@@ -367,9 +380,9 @@ def apply_band_to_extracted(
                 "final_amount_raw": _round(grand_mid),
             },
             "breakdown": [
-                {"item": "Total fabricated tonnage", "qty": _round(tonnage), "unit": "t"},
-                {"item": "Per-ton rate — low",       "qty": _format_money(rate_low,  c), "unit": "/ ton"},
-                {"item": "Per-ton rate — high",      "qty": _format_money(rate_high, c), "unit": "/ ton"},
+                {"item": "Total fabricated tonnage", "qty": _round(tonnage), "unit": ton_unit + "s"},
+                {"item": "Per-ton rate — low",       "qty": _format_money(rate_low,  c), "unit": f"/ {ton_unit}"},
+                {"item": "Per-ton rate — high",      "qty": _format_money(rate_high, c), "unit": f"/ {ton_unit}"},
             ],
             "meta": {
                 "engine": "STRUCTMIND CORE",
