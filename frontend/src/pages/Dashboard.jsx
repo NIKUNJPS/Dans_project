@@ -99,7 +99,7 @@ export default function Dashboard() {
             <div className="border-b border-ink-line bg-white px-10 py-10">
                 <div className="flex items-end justify-between">
                     <div>
-                        <div className="text-overline">Welcome back</div>
+                        <div className="text-overline">Welcome Back</div>
                         <h1 className="mt-2 font-heading text-5xl font-black leading-none tracking-tight text-navy">
                             {user?.first_name} {user?.last_name}
                         </h1>
