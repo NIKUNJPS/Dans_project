@@ -39,7 +39,7 @@ The preview environment already has everything wired. For production, set these 
 | `MONGO_URL` | Mongo connection string | Mongo Atlas → cluster → Connect → Application |
 | `DB_NAME` | Mongo database name | Your choice (e.g. `structmind_prod`) |
 | `ANTHROPIC_API_KEY` | **Required.** Claude API key that runs every analysis | console.anthropic.com → API Keys |
-| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Defaults `claude-opus-5-5` → `claude-sonnet-5-5` | — |
+| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Defaults `claude-sonnet-5-5` → `claude-opus-5-5`. Set `ANTHROPIC_MODEL=claude-opus-5-5` for the most accurate (2× cost) drawing reading | — |
 | `ANTHROPIC_EFFORT` | Optional. Reasoning depth, default `high` (`xhigh`/`max` = slower, deeper) | — |
 | `ANTHROPIC_SERVER_FALLBACK` | Optional, default `true`. Set `false` on Bedrock / Vertex / Foundry | — |
 | `BINDER_BATCH_PAGES` / `BINDER_BATCH_MB` | Optional. Page batch size, default 25 pages / 28 MB per Claude call | — |
@@ -292,7 +292,7 @@ Upload drawings, set the LOW/HIGH rate band, and get the full report with a PDF 
 Gated by the existing `canRunEstimation` permission and `estimationCountries`.
 
 > Bring your own key: set `ANTHROPIC_API_KEY` in the backend env (see PART 1 ②). The engine
-> uses Claude (Sonnet 5 primary → Opus 4.8 fallback) and reads that key automatically.
+> uses Claude (Sonnet 5.5 primary → Opus 5.5 fallback) and reads that key automatically.
 
 ### ③ Unused projects are cleaned up
 - **Hard delete:** `DELETE /api/projects/{id}?hard=true` permanently removes a project and
@@ -357,8 +357,8 @@ confidence banding and the cleanup date logic. Run: `pytest tests/test_estimatio
   The Estimate page now runs as a background job (no gateway time-outs on large binders).
 
 ### ③ Claude engine
-- Default `claude-opus-5-5` (adaptive thinking, effort `high`, 128K streamed output), fallback
-  `claude-sonnet-5-5`, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
+- Default `claude-sonnet-5-5` (adaptive thinking, effort `high`, 128K streamed output), fallback
+  `claude-opus-5-5`, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
   the system prompt and drawings. SDK pinned: `anthropic==1.11.0` (requires `idna>=3.18`).
 
 ### ④ History & print

@@ -3,10 +3,10 @@
 Everything above this layer (binder batching, take-off, report consolidation) works in
 terms of `generate()` and `run_batch()`; nothing else imports the SDK.
 
-  • Model chain: claude-opus-5-5 (primary) → claude-sonnet-5-5 (fallback), configurable.
+  • Model chain: claude-sonnet-5-5 (primary) → claude-opus-5-5 (fallback), configurable.
     A model is only skipped after the SDK's own retries (429 / 5xx / connection) failed.
-  • Adaptive thinking at effort "high" (Opus 5.5 defaults to "medium", so it is set
-    explicitly) and 128K streamed output, so long take-offs rarely need a continuation.
+  • Adaptive thinking at effort "high", set explicitly (Opus 5.5 would default to
+    "medium"), and 128K streamed output, so long take-offs rarely need a continuation.
   • Server-side refusal fallback (`fallbacks: "default"`), so a false-positive safety
     decline is re-run on another model inside the same call instead of failing the run.
   • Drawings go through the Files API (`client.files`) and are referenced by file_id with
