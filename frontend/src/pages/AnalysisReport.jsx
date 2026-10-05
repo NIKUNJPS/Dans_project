@@ -4,18 +4,18 @@ import {
     AlertOctagon,
     ChevronRight,
     Download,
-    Layers,
+    Loader2,
     MessageSquarePlus,
     Printer,
     RotateCw,
     Sparkles,
     Trash2,
 } from "lucide-react";
-import { api, errMessage } from "@/lib/api";
+import { api, downloadFile, errMessage } from "@/lib/api";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BlockchainBadge } from "@/components/brand/BlockchainBadge";
-import { tokenStore } from "@/lib/auth";
+import { usePermissions } from "@/hooks/usePermissions";
 
 const STAGE_LABELS = {
     queued: "Queued",
@@ -27,14 +27,15 @@ const STAGE_LABELS = {
 const fmtNum = (v, d = 0) =>
     v === null || v === undefined || Number.isNaN(Number(v))
         ? "—"
-        : Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+        : Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 
+// fmt = export route segment, ext = saved file extension, perm = allowedExports key.
 const EXPORTS = [
-    { fmt: "docx", label: "Word" },
-    { fmt: "pdf", label: "PDF" },
-    { fmt: "xlsx", label: "Excel" },
-    { fmt: "csv", label: "CSV" },
-    { fmt: "markdown", label: "Markdown" },
+    { fmt: "docx", label: "Word", ext: "docx", perm: "word" },
+    { fmt: "pdf", label: "PDF", ext: "pdf", perm: "pdf" },
+    { fmt: "xlsx", label: "Excel", ext: "xlsx", perm: "excel" },
+    { fmt: "csv", label: "CSV", ext: "csv", perm: "csv" },
+    { fmt: "markdown", label: "Markdown", ext: "md", perm: "markdown" },
 ];
 
 function parseMarkdownSections(md) {
@@ -196,6 +197,8 @@ export default function AnalysisReport() {
         blocking: false,
     });
     const [creatingRfi, setCreatingRfi] = useState(false);
+    const [downloading, setDownloading] = useState(null);
+    const { perms, exportAllowed } = usePermissions();
 
     const fetchIt = async () => {
         try {
@@ -254,27 +257,24 @@ export default function AnalysisReport() {
 
     const printReport = () => window.print();
 
-    const downloadExport = async (fmt) => {
+    const downloadExport = async (exp) => {
+        setDownloading(exp.fmt);
         try {
-            const token = tokenStore.getAccess();
-            const url = `${process.env.REACT_APP_BACKEND_URL}/api/analyses/${id}/export/${fmt}`;
-            const resp = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            if (!resp.ok) {
-                throw new Error(`Download failed (${resp.status})`);
-            }
-            const blob = await resp.blob();
-            const a = document.createElement("a");
-            a.href = URL.createObjectURL(blob);
-            const baseName = (analysis.project_name || analysis.mode_label || "report").replace(/\s+/g, "_");
-            a.download = `${baseName}.${fmt === "markdown" ? "md" : fmt}`;
-            a.click();
-            URL.revokeObjectURL(a.href);
+            const base = `${analysis.project_name || "Quick_Analysis"}_${analysis.mode_label || "report"}`.replace(
+                /[^\w-]+/g,
+                "_",
+            );
+            await downloadFile(`/api/analyses/${id}/export/${exp.fmt}`, `${base}.${exp.ext}`);
         } catch (e) {
             toast.error(errMessage(e));
+        } finally {
+            setDownloading(null);
         }
     };
+
+    // Until permissions load (or if they cannot be read) show every format; the server
+    // still enforces access on download.
+    const shownExports = perms ? EXPORTS.filter((e) => exportAllowed(e.perm)) : EXPORTS;
 
     const createRfi = async () => {
         setCreatingRfi(true);
@@ -483,24 +483,36 @@ export default function AnalysisReport() {
                             <div>
                                 <div className="text-overline">Exports</div>
                                 <div className="mt-1 font-heading text-lg font-bold uppercase tracking-tight text-navy">
-                                    All formats generated · SHA-256 anchored
+                                    Download report · SHA-256 anchored
                                 </div>
                             </div>
                             <BlockchainBadge hash={analysis.blockchain_hash} />
                         </div>
                         <div className="mt-5 flex flex-wrap gap-2">
-                            {EXPORTS.map((e) => (
+                            {shownExports.map((e) => (
                                 <button
                                     key={e.fmt}
                                     data-testid={`export-${e.fmt}`}
-                                    onClick={() => downloadExport(e.fmt)}
-                                    className="inline-flex items-center gap-2 border border-navy bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-navy transition-colors hover:bg-navy hover:text-gold"
+                                    onClick={() => downloadExport(e)}
+                                    disabled={downloading !== null}
+                                    className="inline-flex items-center gap-2 border border-navy bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-navy transition-colors hover:bg-navy hover:text-gold disabled:cursor-wait disabled:opacity-60"
                                 >
-                                    <Download size={14} />
+                                    {downloading === e.fmt ? (
+                                        <Loader2 size={14} className="animate-spin" />
+                                    ) : (
+                                        <Download size={14} />
+                                    )}
                                     {e.label}
                                 </button>
                             ))}
                         </div>
+                        {shownExports.length < EXPORTS.length && (
+                            <div className="mt-3 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                                {shownExports.length
+                                    ? "Other formats are not enabled for your account."
+                                    : "Downloads are not enabled for your account. Contact your administrator."}
+                            </div>
+                        )}
                     </div>
 
                     {/* Sections */}
@@ -645,38 +657,24 @@ function SummaryTile({ label, value, sub }) {
     );
 }
 
+// Distinct RFI ids in a narrative report ("RFI-001", "RFI-014", …).
+function countRfis(md) {
+    return new Set((md || "").match(/\bRFI-\d{2,4}\b/g) || []).size;
+}
+
 function ReportSummary({ analysis }) {
     const t = analysis.takeoff_summary;
     const e = analysis.estimate_summary;
-    const b = analysis.binder;
-    if (!t && !e && !b) return null;
     const usa = (t?.jurisdiction || "USA") === "USA";
     const tiles = [];
-    if (b?.total_pages) {
-        tiles.push(
-            <SummaryTile
-                key="binder"
-                label="Binder reviewed"
-                value={`${fmtNum(b.total_pages)} pages`}
-                sub={`${b.documents?.length || 0} documents · ${fmtNum(b.total_mb, 1)} MB`}
-            />,
-        );
-    }
     if (t) {
         tiles.push(
             <SummaryTile
                 key="tons"
-                label="Fabricated tonnage"
+                label="Estimated tonnage"
                 value={usa ? `${fmtNum(t.gross_short_tons, 2)} sh tons` : `${fmtNum(t.gross_t, 2)} t`}
                 sub={usa ? `${fmtNum(t.gross_t, 2)} metric t · ${fmtNum(t.gross_kg)} kg` : `${fmtNum(t.gross_short_tons, 2)} short tons · ${fmtNum(t.gross_kg)} kg`}
             />,
-            <SummaryTile
-                key="pcs"
-                label="Members (Σ Qty)"
-                value={fmtNum(t.pieces)}
-                sub={`${fmtNum(t.line_items)} line items · ${fmtNum(t.sheets)} sheets`}
-            />,
-            <SummaryTile key="rfi" label="Open RFIs" value={fmtNum(t.rfis)} sub="tracked in the RFI package" />,
         );
     }
     if (e?.lock) {
@@ -700,16 +698,10 @@ function ReportSummary({ analysis }) {
             />,
         );
     }
+    const rfis = t ? t.rfis : countRfis(analysis.output_markdown);
+    if (t || rfis) {
+        tiles.push(<SummaryTile key="rfi" label="RFIs" value={fmtNum(rfis)} sub="listed in the RFI package" />);
+    }
     if (!tiles.length) return null;
-    return (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {tiles}
-            {b?.batches > 1 && (
-                <div className="no-print col-span-full flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
-                    <Layers size={12} className="text-gold" />
-                    Read in {b.batches} page batches · consolidated into this single report
-                </div>
-            )}
-        </div>
-    );
+    return <div className={`grid gap-4 sm:grid-cols-2 ${tiles.length > 2 ? "lg:grid-cols-3" : ""}`}>{tiles}</div>;
 }

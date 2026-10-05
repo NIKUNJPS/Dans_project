@@ -46,16 +46,16 @@ async def fake_run_batch(*, system, header_for, units, label, effort=None):
     m = re.search(r"batch (\d+) of", header_for(units))
     n = int(m.group(1)) if m else 1
     if "take-off engine" in system:
-        return [BatchOutput(ROWS % {"n": n}, units, "claude-opus-5-5", Usage())]
-    return [BatchOutput(f"## SECTION 12 — RFI PACKAGE\nRFI-001 question {n}", units, "claude-opus-5-5", Usage())]
+        return [BatchOutput(ROWS % {"n": n}, units, "claude-sonnet-5-5", Usage())]
+    return [BatchOutput(f"## SECTION 12 — RFI PACKAGE\nRFI-001 question {n}", units, "claude-sonnet-5-5", Usage())]
 
 
 async def fake_generate(*, system, content, label, effort=None, client=None):
     if label == "overrides":
-        return GenResult("{}", "claude-opus-5-5", Usage())
+        return GenResult("{}", "claude-sonnet-5-5", Usage())
     ids = re.findall(r"RFI-B\d+-\d+", content[0]["text"])
     return GenResult("## EXECUTIVE SNAPSHOT\n- ok\n\n## SECTION 12 — RFI PACKAGE\n" + "\n".join(dict.fromkeys(ids)),
-                     "claude-opus-5-5", Usage())
+                     "claude-sonnet-5-5", Usage())
 
 
 @pytest.fixture()
@@ -117,6 +117,18 @@ def test_mto_report_estimate_and_history(client, tmp_path):
 
     pdf = client.get(f"/api/analyses/{aid}/export/pdf")
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+
+    # Every format downloads. With the export folder wiped (e.g. a redeploy), a download
+    # builds only the format asked for, so one format never waits on the others.
+    from export_service import EXPORT_DIR
+    for ext in ("pdf", "docx", "xlsx", "csv", "md"):
+        (EXPORT_DIR / f"{aid}.{ext}").unlink(missing_ok=True)
+    docx = client.get(f"/api/analyses/{aid}/export/docx")
+    assert docx.status_code == 200 and docx.content[:2] == b"PK"
+    assert not (EXPORT_DIR / f"{aid}.pdf").exists() and not (EXPORT_DIR / f"{aid}.xlsx").exists()
+    for fmt, magic in (("pdf", b"%PDF"), ("xlsx", b"PK"), ("csv", b"\xef\xbb\xbfsection"), ("markdown", b"# ")):
+        r = client.get(f"/api/analyses/{aid}/export/{fmt}")
+        assert r.status_code == 200 and r.content.startswith(magic), fmt
 
     # Fabricator Estimation Pro prices the SAME cached take-off — no second read.
     r = client.post("/api/analyses", json={"project_id": project["id"], "file_ids": [f["id"]],

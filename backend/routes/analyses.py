@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 
 from config import settings
 from db import get_db
-from export_service import EXPORT_DIR, generate_all_exports
+from export_service import EXPORT_DIR, EXTENSIONS, generate_all_exports, generate_export
 from file_prep import prepare_file
 from claude_engine import has_credentials
 from estimation.tonnage import TakeoffCache
@@ -519,27 +519,26 @@ async def download_export(
         check_feature(perms, "canDownloadReports")
     fmt_alias = {"docx": "word", "xlsx": "excel"}.get(fmt, fmt)
     check_export_access(perms, fmt_alias)
-    ext_map = {"pdf": "pdf", "docx": "docx", "xlsx": "xlsx", "csv": "csv", "markdown": "md"}
-    ext = ext_map.get(fmt)
-    if not ext:
+    exporter = {"pdf": "pdf", "docx": "docx", "xlsx": "xlsx", "csv": "csv", "markdown": "markdown"}.get(fmt)
+    if not exporter:
         raise HTTPException(status_code=400, detail="Unsupported format")
+    ext = EXTENSIONS[exporter]
     path = EXPORT_DIR / f"{aid}.{ext}"
 
-    # Generate on demand if the file is not on disk yet. Exports are produced as a
-    # best-effort step AFTER the report is saved, so a download can race ahead of them
-    # (or a prior generation may have failed). Regenerate from the stored report here so
-    # the user is never blocked by a missing export file.
+    # Build this one format on demand if it is not on disk yet. Exports are produced as a
+    # best-effort step AFTER the report is saved, so a download can race ahead of them, a
+    # prior build may have failed, or the export folder may have been reset on redeploy.
     if not path.exists():
-        if a.get("status") == "complete" and a.get("output_markdown"):
-            export_meta = await _export_meta(db, a)
-            try:
-                await asyncio.to_thread(generate_all_exports, a["output_markdown"], export_meta)
-            except Exception:  # noqa: BLE001
-                logger.exception("on_demand_export_failed analysis=%s fmt=%s", aid, fmt)
-        if not path.exists():
+        if a.get("status") != "complete" or not a.get("output_markdown"):
+            raise HTTPException(status_code=409, detail="The report is still processing. Try again when it completes.")
+        export_meta = await _export_meta(db, a)
+        try:
+            await asyncio.to_thread(generate_export, exporter, a["output_markdown"], export_meta)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("on_demand_export_failed analysis=%s fmt=%s", aid, fmt)
             raise HTTPException(
-                status_code=404,
-                detail="Export could not be generated. The report may still be processing.",
+                status_code=500,
+                detail=f"The {fmt.upper()} export could not be built ({type(e).__name__}). Please try again.",
             )
     media = {
         "pdf": "application/pdf",

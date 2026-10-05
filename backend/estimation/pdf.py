@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import LETTER
@@ -37,6 +38,11 @@ EXPORT_DIR = Path(settings.upload_dir) / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _e(value) -> str:
+    """Escape model/user text for a reportlab Paragraph ('<' or '&' would break the build)."""
+    return _xml_escape(str(value if value is not None else ""))
+
+
 def _styles():
     s = getSampleStyleSheet()
     return {
@@ -58,7 +64,7 @@ def _table(rows, st, col_widths=None, highlight_last=False):
         rendered = []
         style_choice = "tableCellHead" if ri == 0 else "tableCell"
         for cell in row:
-            rendered.append(Paragraph(str(cell), st[style_choice]))
+            rendered.append(Paragraph(_e(cell), st[style_choice]))
         data.append(rendered)
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
     style_cmds = [
@@ -114,7 +120,7 @@ def _kpi_strip(st, kpis):
     for label, value in kpis:
         inner = Table(
             [[Paragraph(label, ParagraphStyle("kpiLabel", fontName="Helvetica-Bold", fontSize=7.5, leading=10, textColor=MUTED, letterSpacing=1))],
-             [Paragraph(value, ParagraphStyle("kpiVal", fontName="Helvetica-Bold", fontSize=14, leading=18, textColor=NAVY))]],
+             [Paragraph(_e(value), ParagraphStyle("kpiVal", fontName="Helvetica-Bold", fontSize=14, leading=18, textColor=NAVY))]],
             colWidths=[1.9 * inch],
         )
         inner.setStyle(TableStyle([
@@ -140,7 +146,7 @@ def _confidence_line(st, v) -> list:
         return []
     return [
         Paragraph("ESTIMATE CONFIDENCE", st["h2"]),
-        Paragraph(f"<b>{conf.get('score', 0)} / 100 — {conf.get('label', '')}.</b> {conf.get('note', '')}", st["body"]),
+        Paragraph(f"<b>{_e(conf.get('score', 0))} / 100 — {_e(conf.get('label', ''))}.</b> {_e(conf.get('note', ''))}", st["body"]),
         Spacer(1, 0.12 * inch),
     ]
 
@@ -254,7 +260,7 @@ def _assumptions_rfis_section(st, v) -> list:
     if assumptions:
         story.append(Paragraph("ASSUMPTIONS", st["h2"]))
         for a in assumptions[:20]:
-            story.append(Paragraph(f"&#9656; &nbsp; {a}", st["body"]))
+            story.append(Paragraph(f"&#9656; &nbsp; {_e(a)}", st["body"]))
         story.append(Spacer(1, 0.12 * inch))
     rfis = v.get("open_rfis") or []
     if rfis:
@@ -280,7 +286,7 @@ def _render_detailer(result: dict, project: str, st: dict) -> list:
     story = _header_block(st, "DETAILER", result["country"])
     story += [
         Paragraph("DETAILING ESTIMATE", st["title"]),
-        Paragraph(f"Project: {project} · Country: {result['country']} · Currency: {result['currency']}", st["subtitle"]),
+        Paragraph(f"Project: {_e(project)} · Country: {_e(result['country'])} · Currency: {_e(result['currency'])}", st["subtitle"]),
     ]
 
     if is_ai:
@@ -304,7 +310,7 @@ def _render_detailer(result: dict, project: str, st: dict) -> list:
                 st, col_widths=[3.6 * inch, 3.6 * inch],
             ),
             Spacer(1, 0.1 * inch),
-            Paragraph(f"Note: {ex.get('notes','—')}", st["meta"]),
+            Paragraph(f"Note: {_e(ex.get('notes', '—'))}", st["meta"]),
             Spacer(1, 0.2 * inch),
 
             Paragraph("RATE BASIS", st["h2"]),
@@ -362,7 +368,7 @@ def _render_detailer(result: dict, project: str, st: dict) -> list:
         Paragraph("DELIVERABLES INCLUDED", st["h2"]),
     ]
     for d in v["deliverables"]:
-        story.append(Paragraph(f"&#9656; &nbsp; {d}", st["body"]))
+        story.append(Paragraph(f"&#9656; &nbsp; {_e(d)}", st["body"]))
     story += [
         Spacer(1, 0.25 * inch),
         Paragraph("FINAL DETAILING COST", st["h2"]),
@@ -379,7 +385,7 @@ def _render_fabricator(result: dict, project: str, st: dict) -> list:
     story = _header_block(st, "FABRICATOR", result["country"])
     story += [
         Paragraph("FABRICATION ESTIMATE", st["title"]),
-        Paragraph(f"Project: {project} · Country: {result['country']} · Currency: {result['currency']}", st["subtitle"]),
+        Paragraph(f"Project: {_e(project)} · Country: {_e(result['country'])} · Currency: {_e(result['currency'])}", st["subtitle"]),
     ]
 
     if is_ai:
@@ -402,7 +408,7 @@ def _render_fabricator(result: dict, project: str, st: dict) -> list:
                 st, col_widths=[3.6 * inch, 3.6 * inch],
             ),
             Spacer(1, 0.1 * inch),
-            Paragraph(f"Note: {ex.get('notes','—')}", st["meta"]),
+            Paragraph(f"Note: {_e(ex.get('notes', '—'))}", st["meta"]),
             Spacer(1, 0.2 * inch),
 
             Paragraph("USER-PROVIDED RATE BAND", st["h2"]),

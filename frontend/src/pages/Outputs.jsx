@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, Download, FileOutput, History, Search, Trash2 } from "lucide-react";
-import { api, errMessage } from "@/lib/api";
+import { api, downloadFile, errMessage } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { BlockchainBadge } from "@/components/brand/BlockchainBadge";
-import { tokenStore } from "@/lib/auth";
 
 const EXPORTS = [
     { fmt: "docx", label: "DOCX" },
@@ -64,18 +63,9 @@ export default function Outputs() {
     }, [items]);
 
     const download = async (a, fmt) => {
-        const token = tokenStore.getAccess();
-        const url = `${process.env.REACT_APP_BACKEND_URL}/api/analyses/${a.id}/export/${fmt}`;
+        const base = `${a.project_name || "Quick_Analysis"}_${a.mode_label || "report"}`.replace(/[^\w-]+/g, "_");
         try {
-            const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-            if (!resp.ok) throw new Error(`Download failed (${resp.status})`);
-            const blob = await resp.blob();
-            const link = document.createElement("a");
-            link.href = URL.createObjectURL(blob);
-            const base = `${a.project_name || "Quick_Analysis"}_${a.mode_label || "report"}`.replace(/[^\w-]+/g, "_");
-            link.download = `${base}.${fmt === "markdown" ? "md" : fmt}`;
-            link.click();
-            URL.revokeObjectURL(link.href);
+            await downloadFile(`/api/analyses/${a.id}/export/${fmt}`, `${base}.${fmt === "markdown" ? "md" : fmt}`);
         } catch (e) {
             toast.error(errMessage(e));
         }

@@ -59,3 +59,35 @@ export const errMessage = (e) =>
     e?.response?.data?.detail ||
     e?.message ||
     "Something went wrong. Please try again.";
+
+/**
+ * Download a file from an authenticated endpoint. Goes through the axios client, so an
+ * expired access token is refreshed automatically, and shows the server's error text.
+ */
+export async function downloadFile(path, filename) {
+    let resp;
+    try {
+        resp = await api.get(path, { responseType: "blob", timeout: 5 * 60 * 1000 });
+    } catch (e) {
+        const data = e?.response?.data;
+        if (data instanceof Blob) {
+            let detail = "";
+            try {
+                detail = JSON.parse(await data.text())?.detail || "";
+            } catch {
+                /* not a JSON error body */
+            }
+            if (detail) throw new Error(detail);
+        }
+        throw e;
+    }
+    const url = URL.createObjectURL(resp.data);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoking immediately can cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+}

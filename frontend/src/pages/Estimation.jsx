@@ -12,7 +12,7 @@ import {
     Trash2,
     UploadCloud,
 } from "lucide-react";
-import { api, errMessage } from "@/lib/api";
+import { api, downloadFile, errMessage } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/hooks/usePermissions";
 
@@ -218,15 +218,7 @@ export default function Estimation() {
         if (!result?.id) return;
         setDownloading(true);
         try {
-            const resp = await api.get(`/api/estimation/${result.id}/pdf`, { responseType: "blob" });
-            const url = URL.createObjectURL(resp.data);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `STRUCTMIND_${role}_estimate.pdf`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
+            await downloadFile(`/api/estimation/${result.id}/pdf`, `STRUCTMIND_${role}_estimate.pdf`);
         } catch (e) {
             toast.error(errMessage(e));
         }
