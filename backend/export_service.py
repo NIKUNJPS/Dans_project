@@ -60,61 +60,86 @@ EXPORT_DIR = Path(settings.upload_dir) / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_LIST_RE = re.compile(r"^(\s*)([-*]|\d+[.)])\s+(.*)$")
+_TABLE_SEP_RE = re.compile(r"^\|[\s\-:|]+\|$")
+_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
+def _lines(md: str) -> list[str]:
+    # Split on newlines only: str.splitlines() also breaks on \x0b, \x1c, \u2028 …, and one
+    # such character inside a cell would end a table.
+    return md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
 def _split_blocks(md: str) -> list[tuple[str, str]]:
-    """Yield (kind, text) blocks where kind is 'h1' 'h2' 'h3' 'table' 'li' 'p'."""
+    """Return (kind, text) blocks: 'h1' 'h2' 'h3' 'table' 'list' 'p'.
+
+    'list' blocks keep their original lines (indent + marker), so numbering and nesting
+    survive; read them with _list_items().
+    """
     blocks: list[tuple[str, str]] = []
-    lines = md.splitlines()
+    lines = _lines(md)
     i = 0
     while i < len(lines):
         line = lines[i].rstrip()
         if not line.strip():
             i += 1
             continue
-        if line.startswith("### "):
-            blocks.append(("h3", line[4:].strip()))
+        heading = _HEADING_RE.match(line)
+        if heading:
+            blocks.append((f"h{min(len(heading.group(1)), 3)}", heading.group(2).strip()))
             i += 1
-        elif line.startswith("## "):
-            blocks.append(("h2", line[3:].strip()))
-            i += 1
-        elif line.startswith("# "):
-            blocks.append(("h1", line[2:].strip()))
-            i += 1
-        elif line.startswith("|") and i + 1 < len(lines) and re.match(r"^\|[\s\-:|]+\|$", lines[i + 1].strip()):
+        elif line.startswith("|") and i + 1 < len(lines) and _TABLE_SEP_RE.match(lines[i + 1].strip()):
             tbl = [line]
             i += 2  # skip separator
             while i < len(lines) and lines[i].strip().startswith("|"):
                 tbl.append(lines[i])
                 i += 1
             blocks.append(("table", "\n".join(tbl)))
-        elif re.match(r"^\s*[-*]\s+", line):
+        elif _LIST_RE.match(line):
             items = []
-            while i < len(lines) and re.match(r"^\s*[-*]\s+", lines[i]):
-                items.append(re.sub(r"^\s*[-*]\s+", "", lines[i]))
+            while i < len(lines) and _LIST_RE.match(lines[i]):
+                items.append(lines[i].rstrip())
                 i += 1
-            blocks.append(("li", "\n".join(items)))
-        elif re.match(r"^\s*\d+\.\s+", line):
-            items = []
-            while i < len(lines) and re.match(r"^\s*\d+\.\s+", lines[i]):
-                items.append(re.sub(r"^\s*\d+\.\s+", "", lines[i]))
-                i += 1
-            blocks.append(("ol", "\n".join(items)))
+            blocks.append(("list", "\n".join(items)))
         else:
             para = [line]
             i += 1
-            while i < len(lines) and lines[i].strip() and not lines[i].startswith(("#", "|", "- ", "* ")):
+            while (i < len(lines) and lines[i].strip() and not lines[i].startswith(("#", "|"))
+                   and not _LIST_RE.match(lines[i])):
                 para.append(lines[i])
                 i += 1
             blocks.append(("p", " ".join(para)))
     return blocks
 
 
+def _list_items(text: str) -> list[tuple[int, str, str]]:
+    """(level, marker, text) per item; marker is '•' for bullets or the source number ('3.')."""
+    parsed = []
+    for line in text.split("\n"):
+        m = _LIST_RE.match(line)
+        if m:
+            parsed.append((len(m.group(1).expandtabs(4)), m.group(2), m.group(3)))
+    indents = sorted({ind for ind, _, _ in parsed})
+    return [(min(indents.index(ind), 3), "•" if mk in ("-", "*") else mk, body) for ind, mk, body in parsed]
+
+
+def _list_line(level: int, marker: str, body: str) -> str:
+    return "   " * level + f"{marker} {_text(body)}"
+
+
 def _table_rows(tbl_md: str) -> list[list[str]]:
     rows: list[list[str]] = []
-    for line in tbl_md.splitlines():
-        if not line.strip().startswith("|"):
+    for line in _lines(tbl_md):
+        row = line.strip()
+        if not row.startswith("|"):
             continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        rows.append(cells)
+        row = row[1:]
+        if row.endswith("|") and not row.endswith("\\|"):
+            row = row[:-1]
+        # GFM escapes a literal pipe inside a cell as "\|".
+        rows.append([c.strip().replace("\\|", "|") for c in _PIPE_RE.split(row)])
     return _normalize_rows(rows)
 
 
@@ -140,11 +165,17 @@ def _normalize_rows(rows: list[list[str]]) -> list[list[str]]:
     return fixed
 
 
+# Emphasis markers only where Markdown treats them as emphasis, so arithmetic such as
+# "2*3*4" or "12 * 26 * 3.5" keeps its operators.
+_BOLD_RE = re.compile(r"(?<![\w*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?![\w*])")
+_ITALIC_RE = re.compile(r"(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?![\w*])")
+_CODE_RE = re.compile(r"`([^`]+)`")
+
+
 def _strip_md(text: str) -> str:
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-    text = re.sub(r"\*(.+?)\*", r"\1", text)
-    text = re.sub(r"`(.+?)`", r"\1", text)
-    return text
+    text = _BOLD_RE.sub(r"\1", text)
+    text = _ITALIC_RE.sub(r"\1", text)
+    return _CODE_RE.sub(r"\1", text)
 
 
 # Characters XML (Word, Excel) cannot store; they occasionally arrive in drawing text.
@@ -213,6 +244,11 @@ def export_markdown(content: str, meta: dict) -> str:
 
 
 # ---------- CSV ----------
+def _csv_safe(value: str) -> str:
+    """Spreadsheets run a cell that starts with = + - @ as a formula; keep it as text."""
+    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+
 def export_csv(content: str, meta: dict) -> str:
     path = EXPORT_DIR / f"{meta['id']}.csv"
     buf = io.StringIO()
@@ -221,9 +257,12 @@ def export_csv(content: str, meta: dict) -> str:
     for kind, text in _split_blocks(content):
         if kind == "table":
             for row in _table_rows(text):
-                w.writerow(["table-row", "row", " | ".join(row)])
+                w.writerow(["table-row", "row", _csv_safe(" | ".join(_text(c) for c in row))])
+        elif kind == "list":
+            for item in _list_items(text):
+                w.writerow(["list", "item", _csv_safe(_list_line(*item))])
         else:
-            w.writerow([kind, kind, _strip_md(text).replace("\n", " ")])
+            w.writerow([kind, kind, _csv_safe(_text(text).replace("\n", " "))])
     with _atomic(path) as tmp:
         # BOM so Excel opens UTF-8 (×, —, ″) correctly.
         tmp.write_text(buf.getvalue(), encoding="utf-8-sig")
@@ -235,12 +274,18 @@ def export_csv(content: str, meta: dict) -> str:
 _NUM_RE = re.compile(r"^-?(?:0|[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*)(?:\.\d+)?$")
 
 
-def _xl_value(raw: str):
+def _xl_value(raw: str) -> tuple[object, str | None]:
+    """(value, number_format): plain numbers become numbers that display exactly as written."""
     t = _text(raw)
-    if _NUM_RE.match(t):
-        n = float(t.replace(",", ""))
-        return int(n) if "." not in t else n
-    return t
+    # Excel keeps 15 significant digits; longer digit strings (IDs, heat numbers) stay text.
+    if not _NUM_RE.match(t) or sum(ch.isdigit() for ch in t) > 15:
+        return t, None
+    digits = t.replace(",", "")
+    grouped = "," in t
+    if "." in digits:
+        places = len(digits.split(".", 1)[1])
+        return float(digits), ("#,##0." if grouped else "0.") + "0" * places
+    return int(digits), ("#,##0" if grouped else None)
 
 
 def _xl_set(cell, value) -> None:
@@ -300,10 +345,10 @@ def export_xlsx(content: str, meta: dict) -> str:
             _xl_set(ref, f"▸ {title} → sheet “{sheet_name}” ({len(rows) - 1:,} rows)")
             ref.font = Font(italic=True, color="0D2240")
             row += 1
-        elif kind in ("li", "ol"):
+        elif kind == "list":
             caption = None
-            for it in text.splitlines():
-                _xl_set(ws.cell(row=row, column=1), "• " + _text(it))
+            for item in _list_items(text):
+                _xl_set(ws.cell(row=row, column=1), _list_line(*item))
                 row += 1
         else:
             m = _CAPTION_RE.match(text)
@@ -329,7 +374,11 @@ def _write_table_sheet(tws, rows: list[list[str]], header_font, header_fill) -> 
 
     for ri, r in enumerate(rows[1:], start=2):
         for c in range(1, ncol + 1):
-            _xl_set(tws.cell(row=ri, column=c), _xl_value(r[c - 1]) if c - 1 < len(r) else "")
+            cell = tws.cell(row=ri, column=c)
+            value, number_format = _xl_value(r[c - 1]) if c - 1 < len(r) else ("", None)
+            _xl_set(cell, value)
+            if number_format:
+                cell.number_format = number_format
 
     # Column widths from a sample of the first rows (cheap on huge tables).
     sample = rows[: min(len(rows), 60)]
@@ -418,9 +467,17 @@ def export_docx(content: str, meta: dict) -> str:
                 continue
             _docx_table(doc, rows)
             doc.add_paragraph("")
-        elif kind in ("li", "ol"):
-            for it in text.splitlines():
-                doc.add_paragraph(_text(it), style="List Bullet" if kind == "li" else "List Number")
+        elif kind == "list":
+            for level, marker, body in _list_items(text):
+                if marker == "•":
+                    style = "List Bullet" if level == 0 else f"List Bullet {min(level + 1, 3)}"
+                    doc.add_paragraph(_text(body), style=style)
+                else:
+                    # Source numbers written as text: Word's shared auto-numbering would run
+                    # on across every list in the document.
+                    para = doc.add_paragraph(f"{marker}\t{_text(body)}")
+                    para.paragraph_format.left_indent = Inches(0.35 + 0.3 * level)
+                    para.paragraph_format.first_line_indent = Inches(-0.3)
         else:
             doc.add_paragraph(_text(text))
 
@@ -445,33 +502,43 @@ _ASCII_FALLBACK = {
     "Σ": "Sum ", "≈": "~", "≥": ">=", "≤": "<=", "≠": "!=", "±": "+/-", "→": "->", "←": "<-",
     "↔": "<->", "▸": ">", "►": ">", "✓": "OK", "✔": "OK", "✗": "x", "✘": "x", "⚠": "!",
     "″": '"', "′": "'", "−": "-", "√": "sqrt", "∅": "dia.", "⌀": "dia.", "Ø": "dia.",
+    "✅": "OK", "❌": "X", "⛔": "X", "🔴": "*", "🟠": "*", "🟡": "*", "🟢": "*", "🔵": "*",
+    "⭐": "*", "📌": "*",
 }
+_INVISIBLE_RE = re.compile("[\ufe0e\ufe0f\u200d]")  # emoji variation selectors, joiners
 
 
 @lru_cache(maxsize=1)
-def _pdf_fonts() -> tuple[str, str, bool]:
-    """(regular, bold, unicode?) — registered once per process."""
+def _pdf_fonts() -> tuple[str, str, frozenset | None]:
+    """(regular, bold, glyph coverage) — registered once per process.
+
+    Coverage is the set of code points the Unicode font can draw, or None when falling
+    back to Helvetica (Windows-1252 only).
+    """
     for regular, bold in _FONT_CANDIDATES:
         if regular and bold and os.path.exists(regular) and os.path.exists(bold):
             try:
-                pdfmetrics.registerFont(TTFont("SM-Sans", regular))
+                face = TTFont("SM-Sans", regular)
+                pdfmetrics.registerFont(face)
                 pdfmetrics.registerFont(TTFont("SM-Sans-Bold", bold))
                 pdfmetrics.registerFontFamily("SM-Sans", normal="SM-Sans", bold="SM-Sans-Bold",
                                               italic="SM-Sans", boldItalic="SM-Sans-Bold")
-                return "SM-Sans", "SM-Sans-Bold", True
+                return "SM-Sans", "SM-Sans-Bold", frozenset(face.face.charToGlyph)
             except Exception:  # noqa: BLE001 — unreadable font file: try the next one
                 logger.warning("pdf_font_unusable path=%s", regular)
-    return "Helvetica", "Helvetica-Bold", False
+    return "Helvetica", "Helvetica-Bold", None
 
 
-def _pdf_text(s: str | None, unicode_font: bool, limit: int | None = None) -> str:
-    """Plain text → reportlab Paragraph markup: '<' and '&' escaped, glyphs the font has."""
-    t = _text(s)
+def _pdf_text(s: str | None, coverage: frozenset | None, limit: int | None = None) -> str:
+    """Plain text → reportlab Paragraph markup: '<' and '&' escaped, only glyphs the font has."""
+    t = _INVISIBLE_RE.sub("", _text(s))
     if limit and len(t) > limit:
         t = t[: limit - 1] + "…"
-    if not unicode_font:
+    if coverage is None:
         t = "".join(_ASCII_FALLBACK.get(ch, ch) for ch in t)
         t = t.encode("cp1252", "replace").decode("cp1252")
+    else:
+        t = "".join(ch if ord(ch) in coverage or ch == "\n" else _ASCII_FALLBACK.get(ch, "") for ch in t)
     return _xml_escape(t)
 
 
@@ -509,19 +576,20 @@ def _col_widths(rows: list[list[str]], avail: float, regular: str, bold: str, fs
     return [m + extra * w / total_want for m, w in zip(need_min, wants)]
 
 
-# A single cell taller than a page cannot be laid out; no real cell comes close to this.
-_PDF_CELL_LIMIT = 1500
+# Rows split across pages, so long cells are fine; this only bounds pathological input.
+_PDF_CELL_LIMIT = 20000
 
 
 def export_pdf(content: str, meta: dict) -> str:
     path = EXPORT_DIR / f"{meta['id']}.pdf"
     blocks = _split_blocks(content)
     wide = _is_wide(blocks)
-    regular, bold, uni = _pdf_fonts()
+    regular, bold, coverage = _pdf_fonts()
+    uni = coverage is not None
     styles = getSampleStyleSheet()
 
     def p(s, **kw):
-        return _pdf_text(s, uni, **kw)
+        return _pdf_text(s, coverage, **kw)
 
     story = []
     brand = ParagraphStyle("brand", parent=styles["Normal"], fontName=bold, textColor=GOLD,
@@ -535,6 +603,7 @@ def export_pdf(content: str, meta: dict) -> str:
     body = ParagraphStyle("body", parent=styles["Normal"], fontName=regular, textColor=INK,
                           fontSize=10.5, leading=15, spaceAfter=8)
     meta_s = ParagraphStyle("meta", parent=body, textColor=MUTED, fontSize=9, spaceAfter=4)
+    list_styles: dict[int, ParagraphStyle] = {}
 
     story.append(Paragraph("4XSTRUCT · STRUCTMIND" if uni else "4XSTRUCT - STRUCTMIND", brand))
     story.append(Paragraph(p(meta["mode_label"]).upper(), h1))
@@ -589,14 +658,16 @@ def export_pdf(content: str, meta: dict) -> str:
                 data = [list(header_cells)] + [
                     [Paragraph(p(c, limit=_PDF_CELL_LIMIT), cell) for c in r] for r in chunk
                 ]
-                tbl = Table(data, colWidths=widths, repeatRows=1)
+                tbl = Table(data, colWidths=widths, repeatRows=1, splitInRow=1)
                 tbl.setStyle(tbl_style)
                 story.append(tbl)
             story.append(Spacer(1, 0.15 * inch))
-        elif kind in ("li", "ol"):
-            for idx, it in enumerate(text.splitlines(), 1):
-                bullet = ("•" if uni else "-") if kind == "li" else f"{idx}."
-                story.append(Paragraph(f"{bullet}  {p(it)}", body))
+        elif kind == "list":
+            for level, marker, item in _list_items(text):
+                if level not in list_styles:
+                    list_styles[level] = ParagraphStyle(f"list{level}", parent=body, leftIndent=14 * (level + 1),
+                                                        firstLineIndent=-10, spaceAfter=3)
+                story.append(Paragraph(f"{p(marker)}&nbsp;&nbsp;{p(item)}", list_styles[level]))
         else:
             story.append(Paragraph(p(text), body))
 

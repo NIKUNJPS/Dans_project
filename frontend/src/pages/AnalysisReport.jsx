@@ -11,7 +11,7 @@ import {
     Sparkles,
     Trash2,
 } from "lucide-react";
-import { api, downloadFile, errMessage } from "@/lib/api";
+import { api, downloadFile, errMessage, fileBase } from "@/lib/api";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BlockchainBadge } from "@/components/brand/BlockchainBadge";
@@ -198,7 +198,7 @@ export default function AnalysisReport() {
     });
     const [creatingRfi, setCreatingRfi] = useState(false);
     const [downloading, setDownloading] = useState(null);
-    const { perms, exportAllowed } = usePermissions();
+    const { perms, can, exportAllowed } = usePermissions();
 
     const fetchIt = async () => {
         try {
@@ -260,10 +260,7 @@ export default function AnalysisReport() {
     const downloadExport = async (exp) => {
         setDownloading(exp.fmt);
         try {
-            const base = `${analysis.project_name || "Quick_Analysis"}_${analysis.mode_label || "report"}`.replace(
-                /[^\w-]+/g,
-                "_",
-            );
+            const base = fileBase(analysis.project_name || "Quick Analysis", analysis.mode_label || "report");
             await downloadFile(`/api/analyses/${id}/export/${exp.fmt}`, `${base}.${exp.ext}`);
         } catch (e) {
             toast.error(errMessage(e));
@@ -274,7 +271,11 @@ export default function AnalysisReport() {
 
     // Until permissions load (or if they cannot be read) show every format; the server
     // still enforces access on download.
-    const shownExports = perms ? EXPORTS.filter((e) => exportAllowed(e.perm)) : EXPORTS;
+    const shownExports = !perms
+        ? EXPORTS
+        : can("canDownloadReports")
+          ? EXPORTS.filter((e) => exportAllowed(e.perm))
+          : [];
 
     const createRfi = async () => {
         setCreatingRfi(true);

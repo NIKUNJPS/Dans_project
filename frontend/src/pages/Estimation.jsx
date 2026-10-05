@@ -417,9 +417,9 @@ export default function Estimation() {
                     <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         {isFab ? (
                             <Kpi
-                                label="Fabricated tonnage"
-                                value={`${(ex.tonnage ?? 0).toLocaleString()} ${tonUnit === "short ton" ? "sh tons" : "t"}`}
-                                sub={`${(ex.members_counted ?? 0).toLocaleString()} members (Σ Qty) · ${(ex.line_item_count ?? lineItems.length).toLocaleString()} line items`}
+                                label="Estimated tonnage"
+                                value={`${(ex.tonnage ?? 0).toLocaleString("en-US")} ${tonUnit === "short ton" ? "sh tons" : "t"}`}
+                                sub={`${rfis.length.toLocaleString("en-US")} RFIs`}
                             />
                         ) : (
                             <Kpi label="Detailing hours" value={(v.total_hours ?? 0).toLocaleString()} sub={`${ex.drawings ?? 0} drawings`} />

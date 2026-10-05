@@ -60,6 +60,14 @@ export const errMessage = (e) =>
     e?.message ||
     "Something went wrong. Please try again.";
 
+/** File-name base from parts: keeps letters in any script, drops characters filenames can't hold. */
+export const fileBase = (...parts) =>
+    parts
+        .filter(Boolean)
+        .join("_")
+        .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+        .replace(/^_+|_+$/g, "") || "report";
+
 /**
  * Download a file from an authenticated endpoint. Goes through the axios client, so an
  * expired access token is refreshed automatically, and shows the server's error text.

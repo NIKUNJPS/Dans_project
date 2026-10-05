@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, Download, FileOutput, History, Search, Trash2 } from "lucide-react";
-import { api, downloadFile, errMessage } from "@/lib/api";
+import { ArrowRight, Download, FileOutput, History, Loader2, Search, Trash2 } from "lucide-react";
+import { api, downloadFile, errMessage, fileBase } from "@/lib/api";
+import { usePermissions } from "@/hooks/usePermissions";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { BlockchainBadge } from "@/components/brand/BlockchainBadge";
 
+// fmt = export route segment, ext = saved file extension, perm = allowedExports key.
 const EXPORTS = [
-    { fmt: "docx", label: "DOCX" },
-    { fmt: "pdf", label: "PDF" },
-    { fmt: "xlsx", label: "XLSX" },
-    { fmt: "csv", label: "CSV" },
-    { fmt: "markdown", label: "MD" },
+    { fmt: "docx", label: "DOCX", ext: "docx", perm: "word" },
+    { fmt: "pdf", label: "PDF", ext: "pdf", perm: "pdf" },
+    { fmt: "xlsx", label: "XLSX", ext: "xlsx", perm: "excel" },
+    { fmt: "csv", label: "CSV", ext: "csv", perm: "csv" },
+    { fmt: "markdown", label: "MD", ext: "md", perm: "markdown" },
 ];
 
 const TABS = [
@@ -62,12 +64,25 @@ export default function Outputs() {
         return () => clearInterval(t);
     }, [items]);
 
-    const download = async (a, fmt) => {
-        const base = `${a.project_name || "Quick_Analysis"}_${a.mode_label || "report"}`.replace(/[^\w-]+/g, "_");
+    const { perms, can, exportAllowed } = usePermissions();
+    const [downloading, setDownloading] = useState(null);
+    // Until permissions load (or if they cannot be read) show every format; the server
+    // still enforces access on download.
+    const shownExports = !perms
+        ? EXPORTS
+        : can("canDownloadReports")
+          ? EXPORTS.filter((e) => exportAllowed(e.perm))
+          : [];
+
+    const download = async (a, exp) => {
+        setDownloading(`${a.id}:${exp.fmt}`);
         try {
-            await downloadFile(`/api/analyses/${a.id}/export/${fmt}`, `${base}.${fmt === "markdown" ? "md" : fmt}`);
+            const base = fileBase(a.project_name || "Quick Analysis", a.mode_label || "report");
+            await downloadFile(`/api/analyses/${a.id}/export/${exp.fmt}`, `${base}.${exp.ext}`);
         } catch (e) {
             toast.error(errMessage(e));
+        } finally {
+            setDownloading(null);
         }
     };
 
@@ -189,7 +204,7 @@ export default function Outputs() {
                                                 {(o.takeoff_summary.jurisdiction || "USA") === "USA"
                                                     ? `${Number(o.takeoff_summary.gross_short_tons || 0).toFixed(2)} short tons`
                                                     : `${Number(o.takeoff_summary.gross_t || 0).toFixed(2)} t`}{" "}
-                                                · {Number(o.takeoff_summary.pieces || 0).toLocaleString()} pcs
+                                                estimated · {Number(o.takeoff_summary.rfis || 0).toLocaleString("en-US")} RFIs
                                             </div>
                                         )}
                                     </div>
@@ -213,14 +228,19 @@ export default function Outputs() {
                                 </div>
                                 {o.status === "complete" ? (
                                     <div className="mt-4 flex flex-wrap gap-2">
-                                        {EXPORTS.map((e) => (
+                                        {shownExports.map((e) => (
                                             <button
                                                 key={e.fmt}
-                                                onClick={() => download(o, e.fmt)}
+                                                onClick={() => download(o, e)}
+                                                disabled={downloading !== null}
                                                 data-testid={`output-${o.id}-${e.fmt}`}
-                                                className="inline-flex items-center gap-1 border border-navy bg-white px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-navy hover:bg-navy hover:text-gold"
+                                                className="inline-flex items-center gap-1 border border-navy bg-white px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-navy hover:bg-navy hover:text-gold disabled:cursor-wait disabled:opacity-60"
                                             >
-                                                <Download size={12} />
+                                                {downloading === `${o.id}:${e.fmt}` ? (
+                                                    <Loader2 size={12} className="animate-spin" />
+                                                ) : (
+                                                    <Download size={12} />
+                                                )}
                                                 {e.label}
                                             </button>
                                         ))}
