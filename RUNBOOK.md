@@ -39,7 +39,7 @@ The preview environment already has everything wired. For production, set these 
 | `MONGO_URL` | Mongo connection string | Mongo Atlas → cluster → Connect → Application |
 | `DB_NAME` | Mongo database name | Your choice (e.g. `structmind_prod`) |
 | `ANTHROPIC_API_KEY` | **Required.** Claude API key that runs every analysis | console.anthropic.com → API Keys |
-| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Defaults `claude-sonnet-5-5` → `claude-opus-5-5`. Set `ANTHROPIC_MODEL=claude-opus-5-5` for the most accurate (2× cost) drawing reading | — |
+| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Default `claude-sonnet-5-5` for every analysis, no fallback. Leave both unset (or set `ANTHROPIC_MODEL=claude-sonnet-5-5`); an old `ANTHROPIC_MODEL=claude-opus-5-5` overrides the default. The server logs `claude_models chain=[...]` at startup | — |
 | `ANTHROPIC_EFFORT` | Optional. Reasoning depth, default `high` (`xhigh`/`max` = slower, deeper) | — |
 | `ANTHROPIC_SERVER_FALLBACK` | Optional, default `true`. Set `false` on Bedrock / Vertex / Foundry | — |
 | `BINDER_BATCH_PAGES` / `BINDER_BATCH_MB` | Optional. Page batch size, default 25 pages / 28 MB per Claude call | — |
@@ -357,8 +357,8 @@ confidence banding and the cleanup date logic. Run: `pytest tests/test_estimatio
   The Estimate page now runs as a background job (no gateway time-outs on large binders).
 
 ### ③ Claude engine
-- Default `claude-sonnet-5-5` (adaptive thinking, effort `high`, 128K streamed output), fallback
-  `claude-opus-5-5`, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
+- Default `claude-sonnet-5-5` for every call (adaptive thinking, effort `high`, 128K streamed output),
+  no cross-model fallback unless `ANTHROPIC_FALLBACK_MODEL` is set, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
   the system prompt and drawings. SDK pinned: `anthropic==1.11.0` (requires `idna>=3.18`).
 
 ### ④ History & print

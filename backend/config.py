@@ -33,11 +33,11 @@ class Settings:
 
     # LLM — Claude via the Anthropic API (bring your own key)
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
-    # Primary + fallback model. Sonnet 5.5 reads the drawings at half Opus 5.5's price; the
-    # fallback (Opus 5.5, the stronger reader) only runs if the primary errors out after the
-    # SDK's own retries. Set ANTHROPIC_MODEL=claude-opus-5-5 for maximum accuracy.
+    # Every analysis runs on Sonnet 5.5, the current top Sonnet model (half Opus 5.5's price).
+    # No other model is used unless ANTHROPIC_FALLBACK_MODEL names one; it then runs only if
+    # the primary still errors after the SDK's own retries. Environment values override these.
     anthropic_model: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5")
-    anthropic_fallback_model: str = os.environ.get("ANTHROPIC_FALLBACK_MODEL", "claude-opus-5-5")
+    anthropic_fallback_model: str = os.environ.get("ANTHROPIC_FALLBACK_MODEL", "")
     # Reasoning depth for analysis calls: low | medium | high | xhigh | max.
     anthropic_effort: str = os.environ.get("ANTHROPIC_EFFORT", "high")
     # Server-side refusal fallback (Claude API only — disable on Bedrock/Vertex/Foundry).
