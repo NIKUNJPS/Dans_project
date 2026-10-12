@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from cleanup import hard_delete_project, sweep_unused
 from config import settings
 from db import get_db
+from export_service import remove_exports
 from middleware.permission_guard import audit_log
 from models import ProjectCreate, ProjectUpdate
 from security import block_write_if_readonly, get_current_user, get_super_admin, sha256_hex
@@ -53,7 +54,9 @@ async def list_projects(user=Depends(get_current_user)):
 
 
 @router.post("")
-async def create_project(data: ProjectCreate, user=Depends(get_current_user)):
+async def create_project(data: ProjectCreate, request: Request, user=Depends(get_current_user)):
+    """Any signed-in user can create projects."""
+    block_write_if_readonly(user)
     db = get_db()
     now = _now()
     pid = sha256_hex(f"project:{user['id']}:{data.name}:{now}")[:24]
@@ -70,6 +73,7 @@ async def create_project(data: ProjectCreate, user=Depends(get_current_user)):
     }
     await db.projects.insert_one(doc)
     doc.pop("_id", None)
+    await audit_log(user["id"], "project.create", "project", pid, request, extra={"name": data.name})
     return await _project_out(db, doc)
 
 
@@ -87,7 +91,10 @@ async def get_project(pid: str, user=Depends(get_current_user)):
 
 
 @router.put("/{pid}")
-async def update_project(pid: str, data: ProjectUpdate, user=Depends(get_current_user)):
+async def update_project(pid: str, data: ProjectUpdate, request: Request, user=Depends(get_current_user)):
+    """Rename or edit a project (owner only). Its reports pick up the new name, and their
+    downloads are rebuilt with it."""
+    block_write_if_readonly(user)
     db = get_db()
     p = await db.projects.find_one({"id": pid})
     if not p:
@@ -97,6 +104,12 @@ async def update_project(pid: str, data: ProjectUpdate, user=Depends(get_current
     updates = {k: v for k, v in data.model_dump(exclude_none=True).items()}
     updates["updated_at"] = _now()
     await db.projects.update_one({"id": pid}, {"$set": updates})
+    if "name" in updates and updates["name"] != p.get("name"):
+        await db.analyses.update_many({"project_id": pid}, {"$set": {"project_name": updates["name"]}})
+        async for a in db.analyses.find({"project_id": pid}, {"_id": 0, "id": 1}):
+            remove_exports(a["id"])
+        await audit_log(user["id"], "project.rename", "project", pid, request,
+                        extra={"from": p.get("name", ""), "to": updates["name"]})
     fresh = await db.projects.find_one({"id": pid}, {"_id": 0})
     return await _project_out(db, fresh)
 

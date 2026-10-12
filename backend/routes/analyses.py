@@ -16,10 +16,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from config import settings
 from db import get_db
-from export_service import EXPORT_DIR, EXTENSIONS, generate_all_exports, generate_export
+from export_service import (
+    EXPORT_DIR,
+    EXTENSIONS,
+    download_name,
+    generate_all_exports,
+    generate_export,
+    remove_exports,
+)
 from file_prep import prepare_file
 from claude_engine import has_credentials
 from estimation.tonnage import TakeoffCache
@@ -27,13 +35,11 @@ from pipeline import Cancelled, run_mode
 from middleware.permission_guard import (
     audit_log,
     bump_usage,
-    check_export_access,
-    check_feature,
     check_mode_access,
     check_usage_limit,
     load_permissions,
 )
-from models import AnalysisCreate
+from models import AnalysisCreate, AnalysisRename
 from prompts.prompt_router import (
     get_mode_meta,
     get_mode_prompt,
@@ -212,9 +218,13 @@ async def _run_analysis_task(analysis_id: str):
     await db.users.update_one({"id": user_id}, {"$inc": {"usage_this_month.analyses": 1}})
 
     try:
-        export_meta = await _export_meta(db, {**analysis, "completed_at": _now_iso(), "model_used": model_used,
-                                              "blockchain_hash": output_hash, "mode_label": meta["label"]})
+        # Re-read: the report (or its project) may have been renamed while it was running.
+        latest = await db.analyses.find_one({"id": analysis_id}, {"_id": 0, "output_markdown": 0}) or analysis
+        export_meta = await _export_meta(db, {**latest, "mode_label": meta["label"]})
         exports = await asyncio.to_thread(generate_all_exports, output, export_meta)
+        if await _renamed_since(db, analysis_id, export_meta):
+            _remove_exports(analysis_id)  # rebuilt with the new name on the next download
+            exports = []
         await db.analyses.update_one(
             {"id": analysis_id},
             {"$set": {"exports": [
@@ -232,6 +242,7 @@ async def _export_meta(db, a: dict) -> dict:
     return {
         "id": a["id"],
         "mode_label": a.get("mode_label", "Report"),
+        "title": a.get("title") or "",
         "project_name": proj["name"] if proj else (a.get("project_name") or "Quick Analysis"),
         "completed_at": a.get("completed_at", ""),
         "model_used": a.get("model_used", ""),
@@ -240,11 +251,43 @@ async def _export_meta(db, a: dict) -> dict:
 
 
 def _remove_exports(aid: str) -> None:
-    for ext in ("pdf", "docx", "xlsx", "csv", "md"):
-        try:
-            (EXPORT_DIR / f"{aid}.{ext}").unlink(missing_ok=True)
-        except OSError:
-            pass
+    remove_exports(aid)
+
+
+async def _renamed_since(db, aid: str, built_meta: dict) -> bool:
+    """True when the report's name or project name changed after `built_meta` was read."""
+    now = await db.analyses.find_one({"id": aid}, {"_id": 0, "output_markdown": 0})
+    if not now:
+        return False
+    fresh = await _export_meta(db, now)
+    return (fresh["title"], fresh["project_name"]) != (built_meta["title"], built_meta["project_name"])
+
+
+async def backfill_report_titles(db) -> int:
+    """Name Quick Analyses created before reports had names, after their first drawing.
+
+    Runs at startup; idempotent (only touches quick reports with no name yet).
+    """
+    named = 0
+    cursor = db.analyses.find(
+        {"project_id": {"$in": [None, ""]}, "title": {"$in": [None, ""]}},
+        {"_id": 0, "id": 1, "file_ids": 1},
+    )
+    async for a in cursor:
+        if not a.get("file_ids"):
+            continue
+        f = await db.files.find_one({"id": a["file_ids"][0]}, {"_id": 0, "original_name": 1})
+        title = Path(f["original_name"]).stem.strip()[:120] if f and f.get("original_name") else ""
+        if title:
+            await db.analyses.update_one({"id": a["id"]}, {"$set": {"title": title}})
+            _remove_exports(a["id"])  # covers are rebuilt with the name on the next download
+            named += 1
+    return named
+
+
+def report_name(a: dict) -> str:
+    """What the user calls this report: its own name, else its project, else 'Quick Analysis'."""
+    return a.get("title") or a.get("project_name") or "Quick Analysis"
 
 
 @router.get("/modes")
@@ -309,6 +352,16 @@ async def create_analysis(
             raise HTTPException(status_code=403, detail="Access denied to project")
         project_name = p.get("name") or project_name
 
+    # A Quick Analysis the user didn't name is called after its first drawing.
+    title = (data.title or "").strip()
+    if not title and not data.project_id and data.file_ids:
+        fq = {"id": data.file_ids[0]}
+        if user["role"] != "super_admin":
+            fq["uploaded_by"] = user["id"]
+        first = await db.files.find_one(fq, {"_id": 0, "original_name": 1})
+        if first and first.get("original_name"):
+            title = Path(first["original_name"]).stem.strip()[:120]
+
     full = await db.users.find_one({"id": user["id"]})
     now = _now_iso()
     aid = sha256_hex(f"analysis:{user['id']}:{data.mode}:{now}")[:24]
@@ -316,6 +369,7 @@ async def create_analysis(
         "id": aid,
         "project_id": data.project_id,
         "project_name": project_name,
+        "title": title,
         "file_ids": data.file_ids,
         "requested_by": user["id"],
         "requested_by_name": f"{full.get('first_name','')} {full.get('last_name','')}".strip(),
@@ -445,6 +499,7 @@ async def get_analysis(aid: str, user=Depends(get_current_user)):
                 raise HTTPException(status_code=403, detail="Access denied")
         else:
             raise HTTPException(status_code=403, detail="Access denied")
+    a["can_edit"] = await _can_delete(db, a, user)
     return a
 
 
@@ -505,8 +560,9 @@ async def download_export(
     fmt: str,
     request: Request,
     user=Depends(get_current_user),
-    perms: dict = Depends(load_permissions),
 ):
+    """Download a report in any format. Every user who can open the report can download
+    and print it; there is no per-format or per-user download permission."""
     db = get_db()
     a = await db.analyses.find_one({"id": aid})
     if not a:
@@ -515,10 +571,6 @@ async def download_export(
         p = await db.projects.find_one({"id": a.get("project_id")}) if a.get("project_id") else None
         if not p or not _can_access_project(p, user):
             raise HTTPException(status_code=403, detail="Access denied")
-    if user["role"] != "super_admin":
-        check_feature(perms, "canDownloadReports")
-    fmt_alias = {"docx": "word", "xlsx": "excel"}.get(fmt, fmt)
-    check_export_access(perms, fmt_alias)
     exporter = {"pdf": "pdf", "docx": "docx", "xlsx": "xlsx", "csv": "csv", "markdown": "markdown"}.get(fmt)
     if not exporter:
         raise HTTPException(status_code=400, detail="Unsupported format")
@@ -540,6 +592,10 @@ async def download_export(
                 status_code=500,
                 detail=f"The {fmt.upper()} export could not be built ({type(e).__name__}). Please try again.",
             )
+        # Renamed while building: serve this copy, then drop it so the next download is rebuilt.
+        stale = await _renamed_since(db, aid, export_meta)
+    else:
+        stale = False
     media = {
         "pdf": "application/pdf",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -547,9 +603,27 @@ async def download_export(
         "csv": "text/csv",
         "md": "text/markdown",
     }
-    filename = f"{a.get('mode_label','report').replace(' ', '_')}.{ext}"
+    filename = f"{download_name(report_name(a), a.get('mode_label', 'report'))}.{ext}"
     await audit_log(user["id"], "analysis.export", "analysis", aid, request, extra={"format": fmt})
-    return FileResponse(str(path), filename=filename, media_type=media.get(ext, "application/octet-stream"))
+    return FileResponse(str(path), filename=filename, media_type=media.get(ext, "application/octet-stream"),
+                        background=BackgroundTask(remove_exports, aid) if stale else None)
+
+
+@router.patch("/{aid}")
+async def rename_analysis(aid: str, data: AnalysisRename, request: Request, user=Depends(get_current_user)):
+    """Rename a report. Its exports are rebuilt with the new name on the next download."""
+    block_write_if_readonly(user)
+    db = get_db()
+    a = await db.analyses.find_one({"id": aid}, {"_id": 0, "id": 1, "requested_by": 1, "project_id": 1, "title": 1})
+    if not a:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    if not await _can_delete(db, a, user):
+        raise HTTPException(status_code=403, detail="Only the report's owner can rename it")
+    await db.analyses.update_one({"id": aid}, {"$set": {"title": data.title}})
+    _remove_exports(aid)
+    await audit_log(user["id"], "analysis.rename", "analysis", aid, request,
+                    extra={"from": a.get("title") or "", "to": data.title})
+    return {"id": aid, "title": data.title}
 
 
 @router.delete("/{aid}")

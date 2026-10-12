@@ -103,3 +103,51 @@ def test_one_failing_format_does_not_block_the_others(export_dir, monkeypatch):
     res = {r["format"]: r for r in E.generate_all_exports("# Hi\nBody", META)}
     assert res["docx"]["path"] == "" and "broken" in res["docx"]["error"]
     assert all(res[f]["path"] for f in ("markdown", "csv", "xlsx", "pdf"))
+
+
+def test_arithmetic_asterisks_survive_but_emphasis_is_stripped():
+    assert E._strip_md("Area = 2*3*4 = 24 ft2") == "Area = 2*3*4 = 24 ft2"
+    assert E._strip_md("12 * 26 * 3.5 = 1,092 lb") == "12 * 26 * 3.5 = 1,092 lb"
+    assert E._strip_md("**Weight:** *approx* `W12x26`") == "Weight: approx W12x26"
+    assert E._xl_value("1*2.5*3") == ("1*2.5*3", None)
+
+
+def test_lists_keep_their_numbers_and_nesting(export_dir):
+    md = "Steps to verify:\n1. **Connection design** by EOR\n   - Moment frames\n2. Embed plates\n7. Galvanizing\n#### Deep heading"
+    blocks = E._split_blocks(md)
+    assert blocks[0] == ("p", "Steps to verify:") and blocks[-1] == ("h3", "Deep heading")
+    items = [it for kind, text in blocks if kind == "list" for it in E._list_items(text)]
+    assert items == [(0, "1.", "**Connection design** by EOR"), (1, "•", "Moment frames"),
+                     (0, "2.", "Embed plates"), (0, "7.", "Galvanizing")]
+    import pymupdf
+    text = pymupdf.open(E.export_pdf(md, META))[0].get_text()
+    assert "7." in text and "Galvanizing" in text
+
+
+def test_escaped_pipes_stay_in_their_cell():
+    rows = E._table_rows("| Mark | Flag | Sheet |\n| B12 | RECONCILE \\| VIF | S-201 |")
+    assert rows[1] == ["B12", "RECONCILE | VIF", "S-201"]
+
+
+def test_pdf_rows_taller_than_a_page_split_instead_of_failing(export_dir):
+    long = "word " * 300
+    md = "| # | Question | Impact | Resolution | Priority | Sheet | Status |\n|---|---|---|---|---|---|---|\n" + \
+         f"| 1 | {long} | {long} | {long} | HIGH | S-201 | OPEN |\n"
+    import pymupdf
+    assert pymupdf.open(E.export_pdf(md, META)).page_count >= 2
+
+
+def test_csv_neutralises_formula_cells(export_dir):
+    path = E.export_csv("| =A1+A2 | x |\n|---|---|\n| +12'-6\" | y |\n\n@ grid C", META)
+    body = Path(path).read_text(encoding="utf-8-sig")
+    assert "'=A1+A2 | x" in body and "'+12'-6\"\" | y" in body and "'@ grid C" in body
+
+
+def test_excel_numbers_display_as_written(export_dir):
+    md = "Table: Nums\n| A | B | C | D |\n|---|---|---|---|\n| 3.10 | 1,234.50 | 12345678901234567891 | 0.50 |\n"
+    from openpyxl import load_workbook
+    ws = load_workbook(E.export_xlsx(md, META))["Nums"]
+    assert ws["A2"].value == 3.1 and ws["A2"].number_format == "0.00"
+    assert ws["B2"].value == 1234.5 and ws["B2"].number_format == "#,##0.00"
+    assert ws["C2"].value == "12345678901234567891"
+    assert ws["D2"].number_format == "0.00"

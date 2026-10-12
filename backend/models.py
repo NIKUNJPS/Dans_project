@@ -96,14 +96,16 @@ class UserPublic(BaseModel):
 
 # ---------- PROJECTS ----------
 class ProjectCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(default="", max_length=2000)
     tags: List[str] = Field(default_factory=list)
 
 
 class ProjectUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
+    model_config = ConfigDict(str_strip_whitespace=True)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=2000)
     status: Optional[Literal["active", "archived", "completed"]] = None
     tags: Optional[List[str]] = None
 
@@ -159,6 +161,13 @@ class AnalysisCreate(BaseModel):
     file_ids: List[str] = Field(default_factory=list)
     mode: str
     input_text: str = ""
+    # The user's name for this report (shown on screen, in prints and in download names).
+    title: Optional[str] = Field(default=None, max_length=120)
+
+
+class AnalysisRename(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=120)
 
 
 class AnalysisOut(BaseModel):

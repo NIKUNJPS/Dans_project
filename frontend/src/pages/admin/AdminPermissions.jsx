@@ -8,7 +8,6 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { AdminLayout } from "./AdminLayout";
 
-const EXPORTS = ["pdf", "word", "excel", "csv", "markdown"];
 const COUNTRIES = [
     "USA", "Canada", "UK", "UAE", "Australia",
     "India", "Europe", "Saudi Arabia", "Singapore",
@@ -16,9 +15,7 @@ const COUNTRIES = [
 
 const BOOLEAN_FLAGS = [
     ["canUploadFiles",     "Can upload files"],
-    ["canCreateProjects",  "Can create projects"],
     ["canViewHistory",     "Can view analysis history"],
-    ["canDownloadReports", "Can download reports"],
     ["canSendRfis",        "Can send RFIs"],
     ["canViewAuditLog",    "Can view audit log"],
     ["blockchainAnchoring","Blockchain anchoring"],
@@ -168,7 +165,6 @@ export function AdminPermissionEditor() {
                 maxFileSizeMb:        perms.maxFileSizeMb,
                 maxFilesPerAnalysis:  perms.maxFilesPerAnalysis,
                 allowedModes:         perms.allowedModes || [],
-                allowedExports:       perms.allowedExports || [],
                 estimationCountries:  perms.estimationCountries || [],
                 ...Object.fromEntries(BOOLEAN_FLAGS.map(([k]) => [k, !!perms[k]])),
             };
@@ -245,17 +241,12 @@ export function AdminPermissionEditor() {
                     ))}
                 </Section>
 
-                {/* EXPORTS */}
-                <Section title="Allowed export formats">
-                    {EXPORTS.map((fmt) => (
-                        <ToggleRow
-                            key={fmt}
-                            label={fmt.toUpperCase()}
-                            testId={`perm-export-${fmt}`}
-                            checked={(perms.allowedExports || []).includes(fmt)}
-                            onChange={() => toggleListItem("allowedExports", fmt)}
-                        />
-                    ))}
+                {/* Printing, downloads and projects are open to every user. */}
+                <Section title="Always on for every user">
+                    <p className="text-sm text-ink-muted">
+                        Every user can create, rename and delete their own projects, print any report they can open, and
+                        download it as Word, PDF, Excel, CSV or Markdown. No setting is needed.
+                    </p>
                 </Section>
             </div>
 

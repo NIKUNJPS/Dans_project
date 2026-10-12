@@ -3,8 +3,9 @@
 Everything above this layer (binder batching, take-off, report consolidation) works in
 terms of `generate()` and `run_batch()`; nothing else imports the SDK.
 
-  • Model chain: claude-sonnet-5-5 (primary) → claude-opus-5-5 (fallback), configurable.
-    A model is only skipped after the SDK's own retries (429 / 5xx / connection) failed.
+  • Model: claude-sonnet-5-5 for every call (ANTHROPIC_MODEL). An optional
+    ANTHROPIC_FALLBACK_MODEL runs only after the SDK's own retries (429 / 5xx /
+    connection) failed on the primary; none is set by default.
   • Adaptive thinking at effort "high", set explicitly (Opus 5.5 would default to
     "medium"), and 128K streamed output, so long take-offs rarely need a continuation.
   • Server-side refusal fallback (`fallbacks: "default"`), so a false-positive safety
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 MODEL_CHAIN: list[str] = list(dict.fromkeys(
     m for m in (settings.anthropic_model, settings.anthropic_fallback_model) if m
 ))
+logger.info("claude_models chain=%s effort=%s", MODEL_CHAIN, settings.anthropic_effort)
 
 ENGINE_LABELS: dict[str, str] = {
     "claude-fable-5-1": "STRUCTMIND CORE · APEX",

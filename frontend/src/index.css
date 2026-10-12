@@ -261,6 +261,30 @@ code,
         width: 100% !important;
         max-width: 100% !important;
     }
+    /* Use the whole sheet: no centred max-width column, no grey page background. */
+    .container-steel {
+        max-width: none !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        padding-top: 4mm !important;
+        padding-bottom: 0 !important;
+    }
+    .bg-background,
+    .min-h-full {
+        background: #fff !important;
+    }
+    .print-tight {
+        padding: 0 0 4mm 0 !important;
+        border-bottom: 2px solid #0d2240 !important;
+    }
+    .print-section {
+        padding: 0 !important;
+        border: none !important;
+    }
+    .print-section + .print-section {
+        margin-top: 6mm !important;
+    }
+
     .card-steel {
         box-shadow: none !important;
         break-inside: auto;

@@ -39,7 +39,7 @@ The preview environment already has everything wired. For production, set these 
 | `MONGO_URL` | Mongo connection string | Mongo Atlas → cluster → Connect → Application |
 | `DB_NAME` | Mongo database name | Your choice (e.g. `structmind_prod`) |
 | `ANTHROPIC_API_KEY` | **Required.** Claude API key that runs every analysis | console.anthropic.com → API Keys |
-| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Defaults `claude-sonnet-5-5` → `claude-opus-5-5`. Set `ANTHROPIC_MODEL=claude-opus-5-5` for the most accurate (2× cost) drawing reading | — |
+| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Default `claude-sonnet-5-5` for every analysis, no fallback. Leave both unset (or set `ANTHROPIC_MODEL=claude-sonnet-5-5`); an old `ANTHROPIC_MODEL=claude-opus-5-5` overrides the default. The server logs `claude_models chain=[...]` at startup | — |
 | `ANTHROPIC_EFFORT` | Optional. Reasoning depth, default `high` (`xhigh`/`max` = slower, deeper) | — |
 | `ANTHROPIC_SERVER_FALLBACK` | Optional, default `true`. Set `false` on Bedrock / Vertex / Foundry | — |
 | `BINDER_BATCH_PAGES` / `BINDER_BATCH_MB` | Optional. Page batch size, default 25 pages / 28 MB per Claude call | — |
@@ -357,16 +357,24 @@ confidence banding and the cleanup date logic. Run: `pytest tests/test_estimatio
   The Estimate page now runs as a background job (no gateway time-outs on large binders).
 
 ### ③ Claude engine
-- Default `claude-sonnet-5-5` (adaptive thinking, effort `high`, 128K streamed output), fallback
-  `claude-opus-5-5`, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
+- Default `claude-sonnet-5-5` for every call (adaptive thinking, effort `high`, 128K streamed output),
+  no cross-model fallback unless `ANTHROPIC_FALLBACK_MODEL` is set, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
   the system prompt and drawings. SDK pinned: `anthropic==1.11.0` (requires `idna>=3.18`).
 
 ### ④ History & print
 - Delete one report (report page / project page / Reports list), **Clear history** for a project
   (reports + estimates; drawings kept), **Clear quick-analysis history**, delete estimates, delete files,
   and permanently delete a project. Report exports on disk are removed with the report.
-- **Print** on every report and on the Estimate page: no app chrome, every table fully expanded,
-  A4 landscape. API: `POST /api/analyses/bulk-delete` with `{ids}` | `{project_id}` | `{scope:"quick"}`.
+- **Print** on every report, on the Estimate page, and from the Reports list / project history
+  (opens the report with `?print=1` and prints it): no app chrome, full page width, every table fully
+  expanded, A4 landscape. API: `POST /api/analyses/bulk-delete` with `{ids}` | `{project_id}` | `{scope:"quick"}`.
+- **Open to every user, no permission needed:** printing and downloading every format (Word, PDF, Excel,
+  CSV, Markdown), and creating, renaming (`PUT /api/projects/{id}`) and deleting their own projects.
+  The admin "allowed exports", "can download reports" and "can create projects" switches were removed.
+- **Report names:** each analysis has a `title` (set in the Analyze form; a Quick Analysis left blank is
+  named after its first drawing). Rename with `PATCH /api/analyses/{id}` `{title}`. The name is the report
+  heading, the print title, the export cover ("Report: …") and the download file name
+  (`<name>_<mode>.<ext>`); renaming a project renames its reports' project line too.
 
 ### ⑤ Prompts
 - One missing-data convention (em-dash + RFI unless a mode defines its own token), no 7-column cap,

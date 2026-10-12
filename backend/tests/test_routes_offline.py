@@ -176,3 +176,106 @@ def test_quick_analysis_master_intake_and_delete(client, tmp_path):
     assert client.delete(f"/api/analyses/{r2['id']}").status_code == 200
     assert client.post("/api/analyses/bulk-delete", json={"scope": "quick"}).json()["deleted"] == 1
     assert client.get("/api/analyses?quick=true").json()["total"] == 0
+
+
+def test_report_names_rename_and_open_downloads(client, tmp_path):
+    from urllib.parse import unquote
+
+    import db as dbm
+    import asyncio
+
+    # Downloads and printing need no permission: even an account with every export
+    # switch turned off can download every format.
+    async def lock_down():
+        await dbm._db.feature_permissions.update_one(
+            {"userId": "u1"}, {"$set": {"allowedExports": [], "canDownloadReports": False}})
+    asyncio.run(lock_down())
+
+    f = _upload(client, _binder(tmp_path / "Riverside Bid Set.pdf", pages=10))
+
+    # Unnamed Quick Analysis -> named after its first drawing.
+    a = client.post("/api/analyses", json={"file_ids": [f["id"]], "mode": "SUMMARIZER"}).json()
+    assert a["title"] == "Riverside Bid Set"
+
+    # Named at creation.
+    r = client.post("/api/analyses", json={"file_ids": [f["id"]], "mode": "SUMMARIZER", "title": "  Tower C — Rev 2 "})
+    aid = r.json()["id"]
+    assert client.get(f"/api/analyses/{aid}").json()["title"] == "Tower C — Rev 2"
+
+    d = client.get(f"/api/analyses/{aid}/export/docx")
+    assert d.status_code == 200 and d.content[:2] == b"PK"
+    assert "Tower_C_Rev_2_" in unquote(d.headers["content-disposition"])
+    for fmt in ("pdf", "xlsx", "csv", "markdown"):
+        assert client.get(f"/api/analyses/{aid}/export/{fmt}").status_code == 200, fmt
+
+    # Rename: blank names are refused; a rename rebuilds the exports with the new name.
+    assert client.patch(f"/api/analyses/{aid}", json={"title": "   "}).status_code == 422
+    r = client.patch(f"/api/analyses/{aid}", json={"title": "North Tower MTO"})
+    assert r.status_code == 200 and r.json()["title"] == "North Tower MTO"
+    md = client.get(f"/api/analyses/{aid}/export/markdown")
+    assert md.text.startswith("# ") and "**Report:** North Tower MTO" in md.text
+    assert "North_Tower_MTO_" in unquote(md.headers["content-disposition"])
+    quick = client.get("/api/analyses?quick=true").json()["items"]
+    assert {x["title"] for x in quick} == {"Riverside Bid Set", "North Tower MTO"}
+
+
+def test_project_create_rename_delete(client, tmp_path):
+    p = client.post("/api/projects", json={"name": "  Warehouse A ", "description": "", "tags": []}).json()
+    assert p["name"] == "Warehouse A"
+    f = _upload(client, _binder(tmp_path / "set.pdf", pages=5), p["id"])
+    a = client.post("/api/analyses", json={"project_id": p["id"], "file_ids": [f["id"]], "mode": "SUMMARIZER"}).json()
+    assert a["title"] == ""  # project reports are named after their project unless the user names them
+
+    assert client.put(f"/api/projects/{p['id']}", json={"name": ""}).status_code == 422
+    r = client.put(f"/api/projects/{p['id']}", json={"name": "Warehouse B", "description": "Phase 2"})
+    assert r.status_code == 200 and r.json()["name"] == "Warehouse B"
+    got = client.get(f"/api/analyses/{a['id']}").json()
+    assert got["project_name"] == "Warehouse B"
+    md = client.get(f"/api/analyses/{a['id']}/export/markdown")
+    assert "**Project:** Warehouse B" in md.text
+
+    assert client.delete(f"/api/projects/{p['id']}?hard=true").status_code == 200
+    assert client.get(f"/api/projects/{p['id']}").status_code == 404
+    assert client.get(f"/api/analyses/{a['id']}").status_code == 404
+
+
+def test_old_quick_reports_get_named_and_renames_during_a_run_are_kept(client, tmp_path, monkeypatch):
+    import asyncio
+    from urllib.parse import unquote
+
+    import db as dbm
+    from routes.analyses import backfill_report_titles
+
+    f = _upload(client, _binder(tmp_path / "Harbour Bid Set.pdf", pages=5))
+
+    # A Quick Analysis saved before reports had names.
+    async def legacy():
+        await dbm._db.analyses.insert_one({
+            "id": "legacy1", "project_id": None, "project_name": "Quick Analysis", "file_ids": [f["id"]],
+            "requested_by": "u1", "mode": "SUMMARIZER", "mode_label": "Quick Summary", "status": "complete",
+            "output_markdown": "## Summary\nOld report.", "blockchain_hash": "x", "exports": []})
+        return await backfill_report_titles(dbm._db)
+    assert asyncio.run(legacy()) == 1
+    assert client.get("/api/analyses/legacy1").json()["title"] == "Harbour Bid Set"
+    r = client.get("/api/analyses/legacy1/export/markdown")
+    assert "Harbour_Bid_Set_" in unquote(r.headers["content-disposition"]) and "**Report:** Harbour Bid Set" in r.text
+
+    # Renamed while the analysis is still running: the exports carry the new name.
+    original = pipeline.run_batch
+
+    async def rename_mid_run(**kw):
+        aid = (await dbm._db.analyses.find_one({"status": {"$ne": "complete"}}, {"_id": 0, "id": 1}))["id"]
+        await dbm._db.analyses.update_one({"id": aid}, {"$set": {"title": "Renamed Mid Run"}})
+        return await original(**kw)
+    monkeypatch.setattr(pipeline, "run_batch", rename_mid_run)
+    aid = client.post("/api/analyses", json={"file_ids": [f["id"]], "mode": "SUMMARIZER", "title": "Before"}).json()["id"]
+    md = client.get(f"/api/analyses/{aid}/export/markdown")
+    assert "**Report:** Renamed Mid Run" in md.text
+
+
+def test_download_names_keep_every_script():
+    from export_service import download_name
+    assert download_name("टावर परियोजना", "MTO") == "टावर_परियोजना_MTO"
+    assert download_name("Résumé", "MTO") == "Résumé_MTO"
+    assert download_name('a"b\r\n;c', "") == "a_b_c"
+    assert download_name("", "") == "report"

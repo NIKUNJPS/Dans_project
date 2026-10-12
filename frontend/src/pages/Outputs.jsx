@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, Download, FileOutput, History, Search, Trash2 } from "lucide-react";
-import { api, downloadFile, errMessage } from "@/lib/api";
+import { ArrowRight, Download, FileOutput, History, Loader2, Printer, Search, Trash2 } from "lucide-react";
+import { api, downloadFile, errMessage, fileBase } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { BlockchainBadge } from "@/components/brand/BlockchainBadge";
 
+// fmt = export route segment, ext = saved file extension.
 const EXPORTS = [
-    { fmt: "docx", label: "DOCX" },
-    { fmt: "pdf", label: "PDF" },
-    { fmt: "xlsx", label: "XLSX" },
-    { fmt: "csv", label: "CSV" },
-    { fmt: "markdown", label: "MD" },
+    { fmt: "docx", label: "DOCX", ext: "docx" },
+    { fmt: "pdf", label: "PDF", ext: "pdf" },
+    { fmt: "xlsx", label: "XLSX", ext: "xlsx" },
+    { fmt: "csv", label: "CSV", ext: "csv" },
+    { fmt: "markdown", label: "MD", ext: "md" },
 ];
+
+// What the user calls a report: its own name, else its project, else "Quick Analysis".
+const reportName = (a) => a.title || a.project_name || "Quick Analysis";
 
 const TABS = [
     { id: "all", label: "All reports" },
@@ -62,17 +66,22 @@ export default function Outputs() {
         return () => clearInterval(t);
     }, [items]);
 
-    const download = async (a, fmt) => {
-        const base = `${a.project_name || "Quick_Analysis"}_${a.mode_label || "report"}`.replace(/[^\w-]+/g, "_");
+    const [downloading, setDownloading] = useState(null);
+
+    const download = async (a, exp) => {
+        setDownloading(`${a.id}:${exp.fmt}`);
         try {
-            await downloadFile(`/api/analyses/${a.id}/export/${fmt}`, `${base}.${fmt === "markdown" ? "md" : fmt}`);
+            const base = fileBase(reportName(a), a.mode_label || "report");
+            await downloadFile(`/api/analyses/${a.id}/export/${exp.fmt}`, `${base}.${exp.ext}`);
         } catch (e) {
             toast.error(errMessage(e));
+        } finally {
+            setDownloading(null);
         }
     };
 
     const remove = async (a) => {
-        if (!window.confirm(`Delete the "${a.mode_label}" report for ${a.project_name || "Quick Analysis"}? This cannot be undone.`))
+        if (!window.confirm(`Delete the "${a.mode_label}" report "${reportName(a)}"? This cannot be undone.`))
             return;
         try {
             await api.delete(`/api/analyses/${a.id}`);
@@ -105,7 +114,9 @@ export default function Outputs() {
                 if (!q) return true;
                 const needle = q.toLowerCase();
                 return (
-                    i.mode_label?.toLowerCase().includes(needle) || i.project_name?.toLowerCase().includes(needle)
+                    i.mode_label?.toLowerCase().includes(needle) ||
+                    i.project_name?.toLowerCase().includes(needle) ||
+                    i.title?.toLowerCase().includes(needle)
                 );
             }),
         [items, tab, q],
@@ -179,22 +190,34 @@ export default function Outputs() {
                                 <div className="flex items-start justify-between gap-3">
                                     <div className="min-w-0">
                                         <div className="truncate font-heading text-xl font-bold uppercase tracking-tight text-navy">
-                                            {o.project_name || "Quick Analysis"}
+                                            {reportName(o)}
                                         </div>
                                         <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
-                                            {o.mode_label} · {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
+                                            {o.mode_label}
+                                            {o.title && o.project_id ? ` · ${o.project_name}` : ""}
+                                            {!o.project_id ? " · Quick analysis" : ""} ·{" "}
+                                            {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
                                         </div>
                                         {o.takeoff_summary && (
                                             <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-navy">
                                                 {(o.takeoff_summary.jurisdiction || "USA") === "USA"
                                                     ? `${Number(o.takeoff_summary.gross_short_tons || 0).toFixed(2)} short tons`
                                                     : `${Number(o.takeoff_summary.gross_t || 0).toFixed(2)} t`}{" "}
-                                                · {Number(o.takeoff_summary.pieces || 0).toLocaleString()} pcs
+                                                estimated · {Number(o.takeoff_summary.rfis || 0).toLocaleString("en-US")} RFIs
                                             </div>
                                         )}
                                     </div>
                                     <div className="flex flex-shrink-0 items-center gap-3">
                                         <StatusPill a={o} />
+                                        {o.status === "complete" && (
+                                            <Link
+                                                to={`/analyses/${o.id}?print=1`}
+                                                data-testid={`output-print-${o.id}`}
+                                                className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-navy hover:text-gold"
+                                            >
+                                                <Printer size={12} /> Print
+                                            </Link>
+                                        )}
                                         <Link
                                             to={`/analyses/${o.id}`}
                                             className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-gold hover:text-navy"
@@ -216,11 +239,16 @@ export default function Outputs() {
                                         {EXPORTS.map((e) => (
                                             <button
                                                 key={e.fmt}
-                                                onClick={() => download(o, e.fmt)}
+                                                onClick={() => download(o, e)}
+                                                disabled={downloading !== null}
                                                 data-testid={`output-${o.id}-${e.fmt}`}
-                                                className="inline-flex items-center gap-1 border border-navy bg-white px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-navy hover:bg-navy hover:text-gold"
+                                                className="inline-flex items-center gap-1 border border-navy bg-white px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-navy hover:bg-navy hover:text-gold disabled:cursor-wait disabled:opacity-60"
                                             >
-                                                <Download size={12} />
+                                                {downloading === `${o.id}:${e.fmt}` ? (
+                                                    <Loader2 size={12} className="animate-spin" />
+                                                ) : (
+                                                    <Download size={12} />
+                                                )}
                                                 {e.label}
                                             </button>
                                         ))}

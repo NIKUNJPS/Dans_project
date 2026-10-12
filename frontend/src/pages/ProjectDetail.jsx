@@ -6,6 +6,8 @@ import {
     FileIcon,
     History,
     MessageSquareQuote,
+    Pencil,
+    Printer,
     Sparkles,
     Trash2,
     Users,
@@ -13,6 +15,8 @@ import {
 import { api, errMessage } from "@/lib/api";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAuth } from "@/context/AuthContext";
+import { ProjectEditDialog, deleteProjectForever } from "@/components/projects/ProjectEditDialog";
 
 export default function ProjectDetail() {
     const { id } = useParams();
@@ -22,6 +26,8 @@ export default function ProjectDetail() {
     const [analyses, setAnalyses] = useState([]);
     const [rfis, setRfis] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [editOpen, setEditOpen] = useState(false);
+    const { user } = useAuth();
 
     const load = async () => {
         try {
@@ -97,19 +103,13 @@ export default function ProjectDetail() {
     };
 
     const deleteProject = async () => {
-        if (
-            !window.confirm(
-                `Permanently delete "${project.name}" with all its drawings, reports, RFIs and estimates? This cannot be undone.`,
-            )
-        )
-            return;
-        try {
-            await api.delete(`/api/projects/${id}?hard=true`);
-            toast.success("Project deleted");
-            nav("/projects");
-        } catch (e) {
-            toast.error(errMessage(e));
-        }
+        if (await deleteProjectForever(project)) nav("/projects");
+    };
+
+    const onProjectSaved = (p) => {
+        setProject(p);
+        // Reports in this project now carry the new name.
+        setAnalyses((list) => list.map((a) => ({ ...a, project_name: p.name })));
     };
 
     if (loading) return <Skeleton className="m-10 h-96 rounded-none" />;
@@ -146,6 +146,16 @@ export default function ProjectDetail() {
                         )}
                     </div>
                     <div className="flex flex-wrap gap-3">
+                        {(user?.role === "super_admin" || project.owner_id === user?.id) && (
+                        <>
+                        <button
+                            onClick={() => setEditOpen(true)}
+                            data-testid="project-edit-btn"
+                            className="btn-ghost-navy"
+                        >
+                            <Pencil size={14} />
+                            Edit project
+                        </button>
                         <button
                             onClick={deleteProject}
                             data-testid="project-delete-btn"
@@ -154,6 +164,8 @@ export default function ProjectDetail() {
                             <Trash2 size={14} />
                             Delete project
                         </button>
+                        </>
+                        )}
                         <Link
                             to={`/projects/${id}/analyze`}
                             data-testid="project-analyze-btn"
@@ -256,9 +268,10 @@ export default function ProjectDetail() {
                                 >
                                     <Link to={`/analyses/${a.id}`} className="min-w-0 flex-1 hover:text-gold">
                                         <div className="truncate font-heading text-sm font-semibold uppercase tracking-wide text-navy hover:text-gold">
-                                            {a.mode_label || a.mode}
+                                            {a.title || a.mode_label || a.mode}
                                         </div>
                                         <div className="font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                                            {a.title ? `${a.mode_label} · ` : ""}
                                             {a.created_at ? new Date(a.created_at).toLocaleString() : ""}
                                             {a.takeoff_summary
                                                 ? ` · ${(a.takeoff_summary.jurisdiction || "USA") === "USA"
@@ -268,6 +281,17 @@ export default function ProjectDetail() {
                                         </div>
                                     </Link>
                                     <StatusPill status={a.status} progress={a.progress} />
+                                    {a.status === "complete" && (
+                                        <Link
+                                            to={`/analyses/${a.id}?print=1`}
+                                            data-testid={`project-analysis-print-${a.id}`}
+                                            className="text-ink-muted hover:text-navy"
+                                            aria-label="Print report"
+                                            title="Print report"
+                                        >
+                                            <Printer size={14} />
+                                        </Link>
+                                    )}
                                     <button
                                         onClick={() => deleteAnalysis(a)}
                                         className="text-ink-muted hover:text-destructive"
@@ -281,6 +305,7 @@ export default function ProjectDetail() {
                     </SectionBlock>
                 </div>
             </div>
+            <ProjectEditDialog project={project} open={editOpen} onOpenChange={setEditOpen} onSaved={onProjectSaved} />
         </div>
     );
 }

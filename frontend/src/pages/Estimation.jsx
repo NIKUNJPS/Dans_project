@@ -12,7 +12,7 @@ import {
     Trash2,
     UploadCloud,
 } from "lucide-react";
-import { api, downloadFile, errMessage } from "@/lib/api";
+import { api, downloadFile, errMessage, fileBase } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/hooks/usePermissions";
 
@@ -218,7 +218,11 @@ export default function Estimation() {
         if (!result?.id) return;
         setDownloading(true);
         try {
-            await downloadFile(`/api/estimation/${result.id}/pdf`, `STRUCTMIND_${role}_estimate.pdf`);
+            const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+            await downloadFile(
+                `/api/estimation/${result.id}/pdf`,
+                `${fileBase(result.project_name || "STRUCTMIND", roleLabel, "Estimate")}.pdf`,
+            );
         } catch (e) {
             toast.error(errMessage(e));
         }
@@ -417,9 +421,9 @@ export default function Estimation() {
                     <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         {isFab ? (
                             <Kpi
-                                label="Fabricated tonnage"
-                                value={`${(ex.tonnage ?? 0).toLocaleString()} ${tonUnit === "short ton" ? "sh tons" : "t"}`}
-                                sub={`${(ex.members_counted ?? 0).toLocaleString()} members (Σ Qty) · ${(ex.line_item_count ?? lineItems.length).toLocaleString()} line items`}
+                                label="Estimated tonnage"
+                                value={`${(ex.tonnage ?? 0).toLocaleString("en-US")} ${tonUnit === "short ton" ? "sh tons" : "t"}`}
+                                sub={`${rfis.length.toLocaleString("en-US")} RFIs`}
                             />
                         ) : (
                             <Kpi label="Detailing hours" value={(v.total_hours ?? 0).toLocaleString()} sub={`${ex.drawings ?? 0} drawings`} />

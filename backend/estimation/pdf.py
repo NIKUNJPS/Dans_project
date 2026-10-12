@@ -99,7 +99,7 @@ def _header_block(st, role: str, country: str) -> list:
         [[
             Paragraph("4XSTRUCT · STRUCTMIND", st["brand"]),
             Paragraph(
-                f"{role.upper()} · {country.upper()} · {datetime.now().strftime('%d %b %Y')}",
+                f"{_e(role.upper())} · {_e(country.upper())} · {datetime.now().strftime('%d %b %Y')}",
                 ParagraphStyle("rhdr", fontName="Helvetica-Bold", fontSize=8.5, leading=11, textColor=WHITE, alignment=2),
             ),
         ]],
@@ -335,9 +335,9 @@ def _render_detailer(result: dict, project: str, st: dict) -> list:
         story += _assumptions_rfis_section(st, v)
         story += [
             Paragraph("FINAL DETAILING RANGE", st["h2"]),
-            Paragraph(v["grand_range_text"], st["moneyBig"]),
+            Paragraph(_e(v["grand_range_text"]), st["moneyBig"]),
             Paragraph(
-                f"Mid-point headline: {v['final_amount']} · Detailing hours × hourly rate band.",
+                f"Mid-point headline: {_e(v['final_amount'])} · Detailing hours × hourly rate band.",
                 st["meta"],
             ),
         ]
@@ -353,7 +353,7 @@ def _render_detailer(result: dict, project: str, st: dict) -> list:
         Spacer(1, 0.25 * inch),
 
         Paragraph("SCOPE OF WORK", st["h2"]),
-        Paragraph(v["scope_summary"], st["body"]),
+        Paragraph(_e(v["scope_summary"]), st["body"]),
         Spacer(1, 0.08 * inch),
 
         Paragraph("HOURS BREAKDOWN BY CATEGORY", st["h2"]),
@@ -372,8 +372,8 @@ def _render_detailer(result: dict, project: str, st: dict) -> list:
     story += [
         Spacer(1, 0.25 * inch),
         Paragraph("FINAL DETAILING COST", st["h2"]),
-        Paragraph(v["final_amount"], st["moneyBig"]),
-        Paragraph(f"All-inclusive · {result['currency']} · Excludes taxes (where applicable)", st["meta"]),
+        Paragraph(_e(v["final_amount"]), st["moneyBig"]),
+        Paragraph(f"All-inclusive · {_e(result['currency'])} · Excludes taxes (where applicable)", st["meta"]),
     ]
     return story
 
@@ -436,9 +436,9 @@ def _render_fabricator(result: dict, project: str, st: dict) -> list:
         story += _assumptions_rfis_section(st, v)
         story += [
             Paragraph("FINAL FABRICATION RANGE", st["h2"]),
-            Paragraph(v["grand_range_text"], st["moneyBig"]),
+            Paragraph(_e(v["grand_range_text"]), st["moneyBig"]),
             Paragraph(
-                f"Mid-point headline: {v['final_amount']} · tonnage × your per-ton band · includes {result['country']} tax.",
+                f"Mid-point headline: {_e(v['final_amount'])} · tonnage × your per-ton band · includes {_e(result['country'])} tax.",
                 st["meta"],
             ),
         ]
@@ -492,9 +492,9 @@ def _render_fabricator(result: dict, project: str, st: dict) -> list:
         Spacer(1, 0.25 * inch),
 
         Paragraph("FINAL FABRICATION RANGE", st["h2"]),
-        Paragraph(v["grand_range_text"], st["moneyBig"]),
+        Paragraph(_e(v["grand_range_text"]), st["moneyBig"]),
         Paragraph(
-            f"Mid-point headline figure: {v['grand_mid']} · Includes tax ({result['country']}) · "
+            f"Mid-point headline figure: {_e(v['grand_mid'])} · Includes tax ({_e(result['country'])}) · "
             f"Range driven by user-provided per-ton band.",
             st["meta"],
         ),

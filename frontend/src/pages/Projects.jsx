@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowRight, FolderKanban, Plus, Users } from "lucide-react";
+import { ArrowRight, FolderKanban, Pencil, Plus, Trash2, Users } from "lucide-react";
 import { api, errMessage } from "@/lib/api";
 import {
     Dialog,
@@ -15,6 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
+import { ProjectEditDialog, deleteProjectForever } from "@/components/projects/ProjectEditDialog";
 
 export default function Projects() {
     const [projects, setProjects] = useState([]);
@@ -22,7 +24,14 @@ export default function Projects() {
     const [open, setOpen] = useState(false);
     const [form, setForm] = useState({ name: "", description: "", tags: "" });
     const [saving, setSaving] = useState(false);
+    const [editing, setEditing] = useState(null);
     const nav = useNavigate();
+    const { user } = useAuth();
+    const isOwner = (p) => user?.role === "super_admin" || p.owner_id === user?.id;
+
+    const removeProject = async (p) => {
+        if (await deleteProjectForever(p)) setProjects((list) => list.filter((x) => x.id !== p.id));
+    };
 
     const load = async () => {
         setLoading(true);
@@ -166,11 +175,14 @@ export default function Projects() {
                 ) : (
                     <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
                         {projects.map((p) => (
-                            <Link
+                            <div
                                 key={p.id}
+                                className="card-steel group flex h-full flex-col transition-all hover:border-navy hover:shadow-[0_8px_20px_-12px_rgba(13,34,64,0.4)]"
+                            >
+                            <Link
                                 to={`/projects/${p.id}`}
                                 data-testid={`project-card-${p.id}`}
-                                className="card-steel group flex h-full flex-col p-6 transition-all hover:border-navy hover:shadow-[0_8px_20px_-12px_rgba(13,34,64,0.4)]"
+                                className="flex flex-1 flex-col p-6 pb-3"
                             >
                                 <div className="flex items-start justify-between">
                                     <div className="min-w-0 flex-1">
@@ -211,10 +223,35 @@ export default function Projects() {
                                     {p.team_members?.length ?? 0} members
                                 </div>
                             </Link>
+                            {isOwner(p) && (
+                            <div className="flex items-center justify-end gap-4 border-t border-ink-line px-6 py-2">
+                                <button
+                                    onClick={() => setEditing(p)}
+                                    data-testid={`project-card-edit-${p.id}`}
+                                    className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-navy hover:text-gold"
+                                >
+                                    <Pencil size={12} /> Edit
+                                </button>
+                                <button
+                                    onClick={() => removeProject(p)}
+                                    data-testid={`project-card-delete-${p.id}`}
+                                    className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-ink-muted hover:text-destructive"
+                                >
+                                    <Trash2 size={12} /> Delete
+                                </button>
+                            </div>
+                            )}
+                            </div>
                         ))}
                     </div>
                 )}
             </div>
+            <ProjectEditDialog
+                project={editing}
+                open={!!editing}
+                onOpenChange={(o) => !o && setEditing(null)}
+                onSaved={(u) => setProjects((list) => list.map((x) => (x.id === u.id ? u : x)))}
+            />
         </div>
     );
 }
