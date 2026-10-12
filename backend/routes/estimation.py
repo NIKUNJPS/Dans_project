@@ -24,6 +24,7 @@ from estimation.ai_extract import extract_quantities
 from estimation.engine import CALCULATORS, apply_band_to_extracted, calculate
 from estimation.pdf import render_pdf
 from estimation.rates import supported_countries
+from export_service import download_name
 from file_prep import prepare_file
 from middleware.permission_guard import (
     audit_log,
@@ -308,16 +309,14 @@ async def download_pdf(
     eid: str,
     request: Request,
     user=Depends(get_current_user),
-    perms: dict = Depends(load_permissions),
 ):
+    """Every user can download and print their own estimates; no download permission."""
     db = get_db()
     e = await db.estimates.find_one({"id": eid})
     if not e:
         raise HTTPException(status_code=404, detail="Estimate not found")
     if user["role"] != "super_admin" and e["user_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Access denied")
-    if user["role"] != "super_admin":
-        check_feature(perms, "canDownloadReports")
 
     if e.get("status") == "processing":
         raise HTTPException(status_code=409, detail="The estimate is still being calculated.")
@@ -338,7 +337,7 @@ async def download_pdf(
     await audit_log(user["id"], "estimation.pdf", "estimate", eid, request)
     return FileResponse(
         path,
-        filename=f"STRUCTMIND_{e['role'].title()}_Estimate.pdf",
+        filename=f"{download_name(e.get('project_name') or 'STRUCTMIND', e['role'].title(), 'Estimate')}.pdf",
         media_type="application/pdf",
     )
 

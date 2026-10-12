@@ -9,6 +9,7 @@ import {
     Trash2,
 } from "lucide-react";
 import { api, errMessage } from "@/lib/api";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
@@ -23,6 +24,7 @@ export default function AnalyzeWizard() {
     const [groups, setGroups] = useState([]);
     const [selectedMode, setSelectedMode] = useState(null);
     const [instructions, setInstructions] = useState("");
+    const [title, setTitle] = useState("");
     const [running, setRunning] = useState(false);
     const [loadingModes, setLoadingModes] = useState(true);
     const [uploadState, setUploadState] = useState(null); // {index, count, name, pct}
@@ -109,6 +111,7 @@ export default function AnalyzeWizard() {
                 file_ids: files.map((f) => f.id),
                 mode: selectedMode,
                 input_text: instructions,
+                title: title.trim() || null,
             });
             toast.success("Analysis queued — redirecting…");
             nav(`/analyses/${data.id}`);
@@ -237,6 +240,26 @@ export default function AnalyzeWizard() {
                                     </div>
                                 </div>
                             ))}
+                        </div>
+
+                        <div className="mt-6">
+                            <label className="mb-2 block text-overline">Report name</label>
+                            <Input
+                                data-testid="analysis-title"
+                                value={title}
+                                maxLength={120}
+                                onChange={(e) => setTitle(e.target.value)}
+                                className="h-11 rounded-none border-ink-line focus-visible:border-gold focus-visible:ring-0"
+                                placeholder={
+                                    files[0]?.original_name
+                                        ? files[0].original_name.replace(/\.[^.]+$/, "")
+                                        : "e.g. Riverside Warehouse — Bid Set Rev 2"
+                                }
+                            />
+                            <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+                                Used on the report, prints and downloads. Leave blank to use{" "}
+                                {projectId ? "the project name" : "the first drawing's name"}.
+                            </div>
                         </div>
 
                         <div className="mt-6">

@@ -19,7 +19,14 @@ from fastapi.responses import FileResponse
 
 from config import settings
 from db import get_db
-from export_service import EXPORT_DIR, EXTENSIONS, generate_all_exports, generate_export
+from export_service import (
+    EXPORT_DIR,
+    EXTENSIONS,
+    download_name,
+    generate_all_exports,
+    generate_export,
+    remove_exports,
+)
 from file_prep import prepare_file
 from claude_engine import has_credentials
 from estimation.tonnage import TakeoffCache
@@ -27,13 +34,11 @@ from pipeline import Cancelled, run_mode
 from middleware.permission_guard import (
     audit_log,
     bump_usage,
-    check_export_access,
-    check_feature,
     check_mode_access,
     check_usage_limit,
     load_permissions,
 )
-from models import AnalysisCreate
+from models import AnalysisCreate, AnalysisRename
 from prompts.prompt_router import (
     get_mode_meta,
     get_mode_prompt,
@@ -232,6 +237,7 @@ async def _export_meta(db, a: dict) -> dict:
     return {
         "id": a["id"],
         "mode_label": a.get("mode_label", "Report"),
+        "title": a.get("title") or "",
         "project_name": proj["name"] if proj else (a.get("project_name") or "Quick Analysis"),
         "completed_at": a.get("completed_at", ""),
         "model_used": a.get("model_used", ""),
@@ -240,11 +246,12 @@ async def _export_meta(db, a: dict) -> dict:
 
 
 def _remove_exports(aid: str) -> None:
-    for ext in ("pdf", "docx", "xlsx", "csv", "md"):
-        try:
-            (EXPORT_DIR / f"{aid}.{ext}").unlink(missing_ok=True)
-        except OSError:
-            pass
+    remove_exports(aid)
+
+
+def report_name(a: dict) -> str:
+    """What the user calls this report: its own name, else its project, else 'Quick Analysis'."""
+    return a.get("title") or a.get("project_name") or "Quick Analysis"
 
 
 @router.get("/modes")
@@ -309,6 +316,16 @@ async def create_analysis(
             raise HTTPException(status_code=403, detail="Access denied to project")
         project_name = p.get("name") or project_name
 
+    # A Quick Analysis the user didn't name is called after its first drawing.
+    title = (data.title or "").strip()
+    if not title and not data.project_id and data.file_ids:
+        fq = {"id": data.file_ids[0]}
+        if user["role"] != "super_admin":
+            fq["uploaded_by"] = user["id"]
+        first = await db.files.find_one(fq, {"_id": 0, "original_name": 1})
+        if first and first.get("original_name"):
+            title = Path(first["original_name"]).stem.strip()[:120]
+
     full = await db.users.find_one({"id": user["id"]})
     now = _now_iso()
     aid = sha256_hex(f"analysis:{user['id']}:{data.mode}:{now}")[:24]
@@ -316,6 +333,7 @@ async def create_analysis(
         "id": aid,
         "project_id": data.project_id,
         "project_name": project_name,
+        "title": title,
         "file_ids": data.file_ids,
         "requested_by": user["id"],
         "requested_by_name": f"{full.get('first_name','')} {full.get('last_name','')}".strip(),
@@ -505,8 +523,9 @@ async def download_export(
     fmt: str,
     request: Request,
     user=Depends(get_current_user),
-    perms: dict = Depends(load_permissions),
 ):
+    """Download a report in any format. Every user who can open the report can download
+    and print it; there is no per-format or per-user download permission."""
     db = get_db()
     a = await db.analyses.find_one({"id": aid})
     if not a:
@@ -515,10 +534,6 @@ async def download_export(
         p = await db.projects.find_one({"id": a.get("project_id")}) if a.get("project_id") else None
         if not p or not _can_access_project(p, user):
             raise HTTPException(status_code=403, detail="Access denied")
-    if user["role"] != "super_admin":
-        check_feature(perms, "canDownloadReports")
-    fmt_alias = {"docx": "word", "xlsx": "excel"}.get(fmt, fmt)
-    check_export_access(perms, fmt_alias)
     exporter = {"pdf": "pdf", "docx": "docx", "xlsx": "xlsx", "csv": "csv", "markdown": "markdown"}.get(fmt)
     if not exporter:
         raise HTTPException(status_code=400, detail="Unsupported format")
@@ -547,9 +562,26 @@ async def download_export(
         "csv": "text/csv",
         "md": "text/markdown",
     }
-    filename = f"{a.get('mode_label','report').replace(' ', '_')}.{ext}"
+    filename = f"{download_name(report_name(a), a.get('mode_label', 'report'))}.{ext}"
     await audit_log(user["id"], "analysis.export", "analysis", aid, request, extra={"format": fmt})
     return FileResponse(str(path), filename=filename, media_type=media.get(ext, "application/octet-stream"))
+
+
+@router.patch("/{aid}")
+async def rename_analysis(aid: str, data: AnalysisRename, request: Request, user=Depends(get_current_user)):
+    """Rename a report. Its exports are rebuilt with the new name on the next download."""
+    block_write_if_readonly(user)
+    db = get_db()
+    a = await db.analyses.find_one({"id": aid}, {"_id": 0, "id": 1, "requested_by": 1, "project_id": 1, "title": 1})
+    if not a:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    if not await _can_delete(db, a, user):
+        raise HTTPException(status_code=403, detail="Only the report's owner can rename it")
+    await db.analyses.update_one({"id": aid}, {"$set": {"title": data.title}})
+    _remove_exports(aid)
+    await audit_log(user["id"], "analysis.rename", "analysis", aid, request,
+                    extra={"from": a.get("title") or "", "to": data.title})
+    return {"id": aid, "title": data.title}
 
 
 @router.delete("/{aid}")

@@ -233,7 +233,8 @@ def export_markdown(content: str, meta: dict) -> str:
     path = EXPORT_DIR / f"{meta['id']}.md"
     header = (
         f"# {meta['mode_label']}\n"
-        f"**Project:** {meta.get('project_name', 'Quick Analysis')}  \n"
+        + (f"**Report:** {meta['title']}  \n" if meta.get("title") else "")
+        + f"**Project:** {meta.get('project_name', 'Quick Analysis')}  \n"
         f"**Generated:** {meta.get('completed_at', '')}  \n"
         f"**Model:** {meta.get('model_used', '')}  \n"
         f"**Hash:** `{meta.get('blockchain_hash', '')}`\n\n---\n\n"
@@ -308,16 +309,22 @@ def export_xlsx(content: str, meta: dict) -> str:
     header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
     header_fill = PatternFill("solid", fgColor="0D2240")
 
-    _xl_set(ws["A1"], _text(meta["mode_label"]))
+    _xl_set(ws["A1"], _text(meta.get("title") or meta["mode_label"]))
     ws["A1"].font = Font(name="Calibri", bold=True, size=16, color="0D2240")
-    _xl_set(ws["A2"], _text(f"Project: {meta.get('project_name', 'Quick Analysis')}"))
-    _xl_set(ws["A3"], _text(f"Generated: {meta.get('completed_at', '')}"))
-    _xl_set(ws["A4"], _text(f"Model: {meta.get('model_used', '')}"))
-    _xl_set(ws["A5"], _text(f"Hash: {meta.get('blockchain_hash', '')}"))
+    cover = [meta["mode_label"] if meta.get("title") else None,
+             f"Project: {meta.get('project_name', 'Quick Analysis')}",
+             f"Generated: {meta.get('completed_at', '')}",
+             f"Model: {meta.get('model_used', '')}",
+             f"Hash: {meta.get('blockchain_hash', '')}"]
+    row = 2
+    for line in cover:
+        if line:
+            _xl_set(ws.cell(row=row, column=1), _text(line))
+            row += 1
     ws.column_dimensions["A"].width = 80
 
     used_sheets = {"report"}
-    row = 7
+    row += 1
     last_heading = None
     caption = None
     table_idx = 0
@@ -449,6 +456,8 @@ def export_docx(content: str, meta: dict) -> str:
     tr.bold = True
     tr.font.size = Pt(28)
     tr.font.color.rgb = NAVY_RGB
+    if meta.get("title"):
+        doc.add_paragraph(_text(f"Report: {meta['title']}"))
     doc.add_paragraph(_text(f"Project: {meta.get('project_name', 'Quick Analysis')}"))
     doc.add_paragraph(_text(f"Generated: {meta.get('completed_at', '')}"))
     doc.add_paragraph(_text(f"Model: {meta.get('model_used', '')}"))
@@ -607,6 +616,8 @@ def export_pdf(content: str, meta: dict) -> str:
 
     story.append(Paragraph("4XSTRUCT · STRUCTMIND" if uni else "4XSTRUCT - STRUCTMIND", brand))
     story.append(Paragraph(p(meta["mode_label"]).upper(), h1))
+    if meta.get("title"):
+        story.append(Paragraph(p(f"Report: {meta['title']}"), meta_s))
     story.append(Paragraph(p(f"Project: {meta.get('project_name', 'Quick Analysis')}"), meta_s))
     story.append(Paragraph(p(f"Generated: {meta.get('completed_at', '')}"), meta_s))
     story.append(Paragraph(p(f"Model: {meta.get('model_used', '')}"), meta_s))
@@ -679,7 +690,7 @@ def export_pdf(content: str, meta: dict) -> str:
             rightMargin=side,
             topMargin=0.75 * inch if wide else 0.85 * inch,
             bottomMargin=0.6 * inch if wide else 0.75 * inch,
-            title=_text(meta.get("project_name") or meta["mode_label"]),
+            title=_text(meta.get("title") or meta.get("project_name") or meta["mode_label"]),
             author="4XStruct",
         )
         pdf.build(story)
@@ -697,6 +708,24 @@ EXPORTERS = {
 
 # File extension on disk for each exporter key.
 EXTENSIONS = {"markdown": "md", "csv": "csv", "xlsx": "xlsx", "pdf": "pdf", "docx": "docx"}
+
+
+def remove_exports(aid: str) -> None:
+    """Delete an analysis's export files; they are rebuilt on the next download."""
+    for ext in EXTENSIONS.values():
+        try:
+            (EXPORT_DIR / f"{aid}.{ext}").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+_FILENAME_UNSAFE_RE = re.compile(r"[^\w\-]+")
+
+
+def download_name(*parts: str) -> str:
+    """'Tower C', 'Master MTO Engine' -> 'Tower_C_Master_MTO_Engine' (letters in any script kept)."""
+    joined = "_".join(p for p in parts if p)
+    return _FILENAME_UNSAFE_RE.sub("_", joined).strip("_") or "report"
 
 
 def generate_export(fmt: str, content: str, meta: dict) -> str:

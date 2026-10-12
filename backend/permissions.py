@@ -18,7 +18,7 @@ def default_permissions(role: str) -> dict[str, Any]:
         "maxFileSizeMb":       100,
         "maxFilesPerAnalysis": 40,           # multi-drawing sets: batched 8-per-batch upstream
         "allowedModes":        [],            # super_admin enables each mode explicitly
-        "allowedExports":      ["markdown", "pdf"],
+        "allowedExports":      ["pdf", "word", "excel", "csv", "markdown"],  # not enforced: everyone downloads every format
         "canUploadFiles":      True,
         "canCreateProjects":   True,
         "canViewHistory":      True,

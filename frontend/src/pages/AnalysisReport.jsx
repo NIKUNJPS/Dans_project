@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
     AlertOctagon,
     ChevronRight,
     Download,
     Loader2,
     MessageSquarePlus,
+    Pencil,
     Printer,
     RotateCw,
     Sparkles,
@@ -15,7 +16,6 @@ import { api, downloadFile, errMessage, fileBase } from "@/lib/api";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BlockchainBadge } from "@/components/brand/BlockchainBadge";
-import { usePermissions } from "@/hooks/usePermissions";
 
 const STAGE_LABELS = {
     queued: "Queued",
@@ -29,13 +29,13 @@ const fmtNum = (v, d = 0) =>
         ? "—"
         : Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 
-// fmt = export route segment, ext = saved file extension, perm = allowedExports key.
+// fmt = export route segment, ext = saved file extension.
 const EXPORTS = [
-    { fmt: "docx", label: "Word", ext: "docx", perm: "word" },
-    { fmt: "pdf", label: "PDF", ext: "pdf", perm: "pdf" },
-    { fmt: "xlsx", label: "Excel", ext: "xlsx", perm: "excel" },
-    { fmt: "csv", label: "CSV", ext: "csv", perm: "csv" },
-    { fmt: "markdown", label: "Markdown", ext: "md", perm: "markdown" },
+    { fmt: "docx", label: "Word", ext: "docx" },
+    { fmt: "pdf", label: "PDF", ext: "pdf" },
+    { fmt: "xlsx", label: "Excel", ext: "xlsx" },
+    { fmt: "csv", label: "CSV", ext: "csv" },
+    { fmt: "markdown", label: "Markdown", ext: "md" },
 ];
 
 function parseMarkdownSections(md) {
@@ -198,7 +198,10 @@ export default function AnalysisReport() {
     });
     const [creatingRfi, setCreatingRfi] = useState(false);
     const [downloading, setDownloading] = useState(null);
-    const { perms, can, exportAllowed } = usePermissions();
+    const [renaming, setRenaming] = useState(false);
+    const [titleDraft, setTitleDraft] = useState("");
+    const [searchParams, setSearchParams] = useSearchParams();
+    const autoPrinted = useRef(false);
 
     const fetchIt = async () => {
         try {
@@ -257,10 +260,41 @@ export default function AnalysisReport() {
 
     const printReport = () => window.print();
 
+    // "Print" on the Reports list or a project page opens the report with ?print=1:
+    // print once the report has rendered, then drop the flag so a refresh doesn't reprint.
+    const printTimer = useRef(null);
+    useEffect(() => {
+        if (analysis?.status !== "complete" || searchParams.get("print") !== "1" || autoPrinted.current) return;
+        autoPrinted.current = true;
+        printTimer.current = setTimeout(() => {
+            window.print();
+            setSearchParams({}, { replace: true });
+        }, 600);
+    }, [analysis?.status, searchParams, setSearchParams]);
+    useEffect(() => () => clearTimeout(printTimer.current), []);
+
+    const reportName = analysis?.title || analysis?.project_name || "Quick Analysis";
+
+    const saveTitle = async () => {
+        const title = titleDraft.trim();
+        if (!title || title === analysis.title) {
+            setRenaming(false);
+            return;
+        }
+        try {
+            await api.patch(`/api/analyses/${id}`, { title });
+            setAnalysis((a) => ({ ...a, title }));
+            toast.success("Report renamed");
+            setRenaming(false);
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+    };
+
     const downloadExport = async (exp) => {
         setDownloading(exp.fmt);
         try {
-            const base = fileBase(analysis.project_name || "Quick Analysis", analysis.mode_label || "report");
+            const base = fileBase(reportName, analysis.mode_label || "report");
             await downloadFile(`/api/analyses/${id}/export/${exp.fmt}`, `${base}.${exp.ext}`);
         } catch (e) {
             toast.error(errMessage(e));
@@ -269,13 +303,6 @@ export default function AnalysisReport() {
         }
     };
 
-    // Until permissions load (or if they cannot be read) show every format; the server
-    // still enforces access on download.
-    const shownExports = !perms
-        ? EXPORTS
-        : can("canDownloadReports")
-          ? EXPORTS.filter((e) => exportAllowed(e.perm))
-          : [];
 
     const createRfi = async () => {
         setCreatingRfi(true);
@@ -309,7 +336,7 @@ export default function AnalysisReport() {
 
     return (
         <div className="min-h-full bg-background">
-            <div className="border-b border-ink-line bg-white px-10 py-8">
+            <div className="print-tight border-b border-ink-line bg-white px-10 py-8">
                 <nav className="no-print mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
                     {analysis.project_id ? (
                         <>
@@ -329,9 +356,52 @@ export default function AnalysisReport() {
                 <div className="flex flex-wrap items-end justify-between gap-6">
                     <div>
                         <div className="text-overline">{analysis.mode_label} · Analysis report</div>
-                        <h1 className="mt-2 font-heading text-4xl font-black leading-none tracking-tight text-navy md:text-5xl">
-                            {analysis.project_name || analysis.mode_label}
-                        </h1>
+                        {renaming ? (
+                            <form
+                                className="no-print mt-2 flex flex-wrap items-center gap-2"
+                                onSubmit={(e) => {
+                                    e.preventDefault();
+                                    saveTitle();
+                                }}
+                            >
+                                <input
+                                    autoFocus
+                                    data-testid="report-title-input"
+                                    value={titleDraft}
+                                    maxLength={120}
+                                    onChange={(e) => setTitleDraft(e.target.value)}
+                                    onKeyDown={(e) => e.key === "Escape" && setRenaming(false)}
+                                    className="h-12 min-w-[320px] border border-navy px-3 font-heading text-2xl font-bold text-navy outline-none focus:border-gold"
+                                />
+                                <button type="submit" data-testid="report-title-save" className="btn-gold" disabled={!titleDraft.trim()}>
+                                    Save
+                                </button>
+                                <button type="button" onClick={() => setRenaming(false)} className="btn-ghost-navy">
+                                    Cancel
+                                </button>
+                            </form>
+                        ) : (
+                            <h1 className="mt-2 flex items-center gap-3 font-heading text-4xl font-black leading-none tracking-tight text-navy md:text-5xl">
+                                <span data-testid="report-title">{reportName}</span>
+                                <button
+                                    onClick={() => {
+                                        setTitleDraft(reportName);
+                                        setRenaming(true);
+                                    }}
+                                    data-testid="rename-report-btn"
+                                    title="Rename report"
+                                    aria-label="Rename report"
+                                    className="no-print text-ink-muted hover:text-gold"
+                                >
+                                    <Pencil size={18} />
+                                </button>
+                            </h1>
+                        )}
+                        {analysis.title && analysis.project_id && (
+                            <div className="mt-2 font-mono text-[11px] uppercase tracking-wider text-ink-muted">
+                                Project: <span className="text-navy">{analysis.project_name}</span>
+                            </div>
+                        )}
                         <div className="mt-3 flex flex-wrap items-center gap-3 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
                             <span className="print-only">STRUCTMIND AI · {analysis.mode_label}</span>
                             <span>Status: <span className="text-navy">{STAGE_LABELS[analysis.status]}</span></span>
@@ -490,7 +560,7 @@ export default function AnalysisReport() {
                             <BlockchainBadge hash={analysis.blockchain_hash} />
                         </div>
                         <div className="mt-5 flex flex-wrap gap-2">
-                            {shownExports.map((e) => (
+                            {EXPORTS.map((e) => (
                                 <button
                                     key={e.fmt}
                                     data-testid={`export-${e.fmt}`}
@@ -507,13 +577,6 @@ export default function AnalysisReport() {
                                 </button>
                             ))}
                         </div>
-                        {shownExports.length < EXPORTS.length && (
-                            <div className="mt-3 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
-                                {shownExports.length
-                                    ? "Other formats are not enabled for your account."
-                                    : "Downloads are not enabled for your account. Contact your administrator."}
-                            </div>
-                        )}
                     </div>
 
                     {/* Sections */}

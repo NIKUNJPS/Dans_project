@@ -176,3 +176,64 @@ def test_quick_analysis_master_intake_and_delete(client, tmp_path):
     assert client.delete(f"/api/analyses/{r2['id']}").status_code == 200
     assert client.post("/api/analyses/bulk-delete", json={"scope": "quick"}).json()["deleted"] == 1
     assert client.get("/api/analyses?quick=true").json()["total"] == 0
+
+
+def test_report_names_rename_and_open_downloads(client, tmp_path):
+    from urllib.parse import unquote
+
+    import db as dbm
+    import asyncio
+
+    # Downloads and printing need no permission: even an account with every export
+    # switch turned off can download every format.
+    async def lock_down():
+        await dbm._db.feature_permissions.update_one(
+            {"userId": "u1"}, {"$set": {"allowedExports": [], "canDownloadReports": False}})
+    asyncio.run(lock_down())
+
+    f = _upload(client, _binder(tmp_path / "Riverside Bid Set.pdf", pages=10))
+
+    # Unnamed Quick Analysis -> named after its first drawing.
+    a = client.post("/api/analyses", json={"file_ids": [f["id"]], "mode": "SUMMARIZER"}).json()
+    assert a["title"] == "Riverside Bid Set"
+
+    # Named at creation.
+    r = client.post("/api/analyses", json={"file_ids": [f["id"]], "mode": "SUMMARIZER", "title": "  Tower C — Rev 2 "})
+    aid = r.json()["id"]
+    assert client.get(f"/api/analyses/{aid}").json()["title"] == "Tower C — Rev 2"
+
+    d = client.get(f"/api/analyses/{aid}/export/docx")
+    assert d.status_code == 200 and d.content[:2] == b"PK"
+    assert "Tower_C_Rev_2_" in unquote(d.headers["content-disposition"])
+    for fmt in ("pdf", "xlsx", "csv", "markdown"):
+        assert client.get(f"/api/analyses/{aid}/export/{fmt}").status_code == 200, fmt
+
+    # Rename: blank names are refused; a rename rebuilds the exports with the new name.
+    assert client.patch(f"/api/analyses/{aid}", json={"title": "   "}).status_code == 422
+    r = client.patch(f"/api/analyses/{aid}", json={"title": "North Tower MTO"})
+    assert r.status_code == 200 and r.json()["title"] == "North Tower MTO"
+    md = client.get(f"/api/analyses/{aid}/export/markdown")
+    assert md.text.startswith("# ") and "**Report:** North Tower MTO" in md.text
+    assert "North_Tower_MTO_" in unquote(md.headers["content-disposition"])
+    quick = client.get("/api/analyses?quick=true").json()["items"]
+    assert {x["title"] for x in quick} == {"Riverside Bid Set", "North Tower MTO"}
+
+
+def test_project_create_rename_delete(client, tmp_path):
+    p = client.post("/api/projects", json={"name": "  Warehouse A ", "description": "", "tags": []}).json()
+    assert p["name"] == "Warehouse A"
+    f = _upload(client, _binder(tmp_path / "set.pdf", pages=5), p["id"])
+    a = client.post("/api/analyses", json={"project_id": p["id"], "file_ids": [f["id"]], "mode": "SUMMARIZER"}).json()
+    assert a["title"] == ""  # project reports are named after their project unless the user names them
+
+    assert client.put(f"/api/projects/{p['id']}", json={"name": ""}).status_code == 422
+    r = client.put(f"/api/projects/{p['id']}", json={"name": "Warehouse B", "description": "Phase 2"})
+    assert r.status_code == 200 and r.json()["name"] == "Warehouse B"
+    got = client.get(f"/api/analyses/{a['id']}").json()
+    assert got["project_name"] == "Warehouse B"
+    md = client.get(f"/api/analyses/{a['id']}/export/markdown")
+    assert "**Project:** Warehouse B" in md.text
+
+    assert client.delete(f"/api/projects/{p['id']}?hard=true").status_code == 200
+    assert client.get(f"/api/projects/{p['id']}").status_code == 404
+    assert client.get(f"/api/analyses/{a['id']}").status_code == 404

@@ -365,8 +365,16 @@ confidence banding and the cleanup date logic. Run: `pytest tests/test_estimatio
 - Delete one report (report page / project page / Reports list), **Clear history** for a project
   (reports + estimates; drawings kept), **Clear quick-analysis history**, delete estimates, delete files,
   and permanently delete a project. Report exports on disk are removed with the report.
-- **Print** on every report and on the Estimate page: no app chrome, every table fully expanded,
-  A4 landscape. API: `POST /api/analyses/bulk-delete` with `{ids}` | `{project_id}` | `{scope:"quick"}`.
+- **Print** on every report, on the Estimate page, and from the Reports list / project history
+  (opens the report with `?print=1` and prints it): no app chrome, full page width, every table fully
+  expanded, A4 landscape. API: `POST /api/analyses/bulk-delete` with `{ids}` | `{project_id}` | `{scope:"quick"}`.
+- **Open to every user, no permission needed:** printing and downloading every format (Word, PDF, Excel,
+  CSV, Markdown), and creating, renaming (`PUT /api/projects/{id}`) and deleting their own projects.
+  The admin "allowed exports", "can download reports" and "can create projects" switches were removed.
+- **Report names:** each analysis has a `title` (set in the Analyze form; a Quick Analysis left blank is
+  named after its first drawing). Rename with `PATCH /api/analyses/{id}` `{title}`. The name is the report
+  heading, the print title, the export cover ("Report: …") and the download file name
+  (`<name>_<mode>.<ext>`); renaming a project renames its reports' project line too.
 
 ### ⑤ Prompts
 - One missing-data convention (em-dash + RFI unless a mode defines its own token), no 7-column cap,
