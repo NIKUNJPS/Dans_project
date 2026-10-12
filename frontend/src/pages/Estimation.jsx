@@ -12,7 +12,7 @@ import {
     Trash2,
     UploadCloud,
 } from "lucide-react";
-import { api, downloadFile, errMessage } from "@/lib/api";
+import { api, downloadFile, errMessage, fileBase } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/hooks/usePermissions";
 
@@ -218,7 +218,11 @@ export default function Estimation() {
         if (!result?.id) return;
         setDownloading(true);
         try {
-            await downloadFile(`/api/estimation/${result.id}/pdf`, `STRUCTMIND_${role}_estimate.pdf`);
+            const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+            await downloadFile(
+                `/api/estimation/${result.id}/pdf`,
+                `${fileBase(result.project_name || "STRUCTMIND", roleLabel, "Estimate")}.pdf`,
+            );
         } catch (e) {
             toast.error(errMessage(e));
         }

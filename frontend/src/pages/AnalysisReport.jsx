@@ -274,10 +274,20 @@ export default function AnalysisReport() {
     useEffect(() => () => clearTimeout(printTimer.current), []);
 
     const reportName = analysis?.title || analysis?.project_name || "Quick Analysis";
+    // Browsers name "Save as PDF" after the page title.
+    useEffect(() => {
+        if (!analysis) return undefined;
+        const prev = document.title;
+        document.title = `${reportName} – ${analysis.mode_label}`;
+        return () => {
+            document.title = prev;
+        };
+    }, [reportName, analysis]);
+    const canEdit = analysis?.can_edit !== false;
 
     const saveTitle = async () => {
         const title = titleDraft.trim();
-        if (!title || title === analysis.title) {
+        if (!title || title === reportName) {
             setRenaming(false);
             return;
         }
@@ -383,6 +393,7 @@ export default function AnalysisReport() {
                         ) : (
                             <h1 className="mt-2 flex items-center gap-3 font-heading text-4xl font-black leading-none tracking-tight text-navy md:text-5xl">
                                 <span data-testid="report-title">{reportName}</span>
+                                {canEdit && (
                                 <button
                                     onClick={() => {
                                         setTitleDraft(reportName);
@@ -395,6 +406,7 @@ export default function AnalysisReport() {
                                 >
                                     <Pencil size={18} />
                                 </button>
+                                )}
                             </h1>
                         )}
                         {analysis.title && analysis.project_id && (
@@ -450,15 +462,17 @@ export default function AnalysisReport() {
                             <RotateCw size={14} />
                             Re-run
                         </button>
-                        <button
-                            onClick={deleteAnalysis}
-                            disabled={deleting}
-                            data-testid="delete-analysis-btn"
-                            className="inline-flex items-center gap-2 border border-destructive bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white disabled:opacity-50"
-                        >
-                            <Trash2 size={14} />
-                            {deleting ? "Deleting…" : "Delete"}
-                        </button>
+                        {canEdit && (
+                            <button
+                                onClick={deleteAnalysis}
+                                disabled={deleting}
+                                data-testid="delete-analysis-btn"
+                                className="inline-flex items-center gap-2 border border-destructive bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white disabled:opacity-50"
+                            >
+                                <Trash2 size={14} />
+                                {deleting ? "Deleting…" : "Delete"}
+                            </button>
+                        )}
                     </div>
                 </div>
             </div>

@@ -300,10 +300,10 @@ export default function Dashboard() {
                                     >
                                         <td className="px-6 py-4">
                                             <div className="font-heading text-sm font-semibold uppercase text-navy">
-                                                {a.mode_label || a.mode}
+                                                {a.title || a.project_name || "Quick Analysis"}
                                             </div>
                                             <div className="font-mono text-[10px] uppercase text-ink-muted">
-                                                {new Date(a.created_at).toLocaleString()}
+                                                {a.mode_label || a.mode} · {new Date(a.created_at).toLocaleString()}
                                             </div>
                                         </td>
                                         <td className="px-6 py-4">

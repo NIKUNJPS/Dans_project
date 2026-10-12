@@ -251,9 +251,11 @@ export default function AnalyzeWizard() {
                                 onChange={(e) => setTitle(e.target.value)}
                                 className="h-11 rounded-none border-ink-line focus-visible:border-gold focus-visible:ring-0"
                                 placeholder={
-                                    files[0]?.original_name
-                                        ? files[0].original_name.replace(/\.[^.]+$/, "")
-                                        : "e.g. Riverside Warehouse — Bid Set Rev 2"
+                                    projectId
+                                        ? "Defaults to the project name"
+                                        : files[0]?.original_name
+                                          ? files[0].original_name.replace(/\.[^.]+$/, "")
+                                          : "e.g. Riverside Warehouse — Bid Set Rev 2"
                                 }
                             />
                             <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-ink-muted">

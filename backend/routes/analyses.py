@@ -16,6 +16,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from config import settings
 from db import get_db
@@ -217,9 +218,13 @@ async def _run_analysis_task(analysis_id: str):
     await db.users.update_one({"id": user_id}, {"$inc": {"usage_this_month.analyses": 1}})
 
     try:
-        export_meta = await _export_meta(db, {**analysis, "completed_at": _now_iso(), "model_used": model_used,
-                                              "blockchain_hash": output_hash, "mode_label": meta["label"]})
+        # Re-read: the report (or its project) may have been renamed while it was running.
+        latest = await db.analyses.find_one({"id": analysis_id}, {"_id": 0, "output_markdown": 0}) or analysis
+        export_meta = await _export_meta(db, {**latest, "mode_label": meta["label"]})
         exports = await asyncio.to_thread(generate_all_exports, output, export_meta)
+        if await _renamed_since(db, analysis_id, export_meta):
+            _remove_exports(analysis_id)  # rebuilt with the new name on the next download
+            exports = []
         await db.analyses.update_one(
             {"id": analysis_id},
             {"$set": {"exports": [
@@ -247,6 +252,37 @@ async def _export_meta(db, a: dict) -> dict:
 
 def _remove_exports(aid: str) -> None:
     remove_exports(aid)
+
+
+async def _renamed_since(db, aid: str, built_meta: dict) -> bool:
+    """True when the report's name or project name changed after `built_meta` was read."""
+    now = await db.analyses.find_one({"id": aid}, {"_id": 0, "output_markdown": 0})
+    if not now:
+        return False
+    fresh = await _export_meta(db, now)
+    return (fresh["title"], fresh["project_name"]) != (built_meta["title"], built_meta["project_name"])
+
+
+async def backfill_report_titles(db) -> int:
+    """Name Quick Analyses created before reports had names, after their first drawing.
+
+    Runs at startup; idempotent (only touches quick reports with no name yet).
+    """
+    named = 0
+    cursor = db.analyses.find(
+        {"project_id": {"$in": [None, ""]}, "title": {"$in": [None, ""]}},
+        {"_id": 0, "id": 1, "file_ids": 1},
+    )
+    async for a in cursor:
+        if not a.get("file_ids"):
+            continue
+        f = await db.files.find_one({"id": a["file_ids"][0]}, {"_id": 0, "original_name": 1})
+        title = Path(f["original_name"]).stem.strip()[:120] if f and f.get("original_name") else ""
+        if title:
+            await db.analyses.update_one({"id": a["id"]}, {"$set": {"title": title}})
+            _remove_exports(a["id"])  # covers are rebuilt with the name on the next download
+            named += 1
+    return named
 
 
 def report_name(a: dict) -> str:
@@ -463,6 +499,7 @@ async def get_analysis(aid: str, user=Depends(get_current_user)):
                 raise HTTPException(status_code=403, detail="Access denied")
         else:
             raise HTTPException(status_code=403, detail="Access denied")
+    a["can_edit"] = await _can_delete(db, a, user)
     return a
 
 
@@ -555,6 +592,10 @@ async def download_export(
                 status_code=500,
                 detail=f"The {fmt.upper()} export could not be built ({type(e).__name__}). Please try again.",
             )
+        # Renamed while building: serve this copy, then drop it so the next download is rebuilt.
+        stale = await _renamed_since(db, aid, export_meta)
+    else:
+        stale = False
     media = {
         "pdf": "application/pdf",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -564,7 +605,8 @@ async def download_export(
     }
     filename = f"{download_name(report_name(a), a.get('mode_label', 'report'))}.{ext}"
     await audit_log(user["id"], "analysis.export", "analysis", aid, request, extra={"format": fmt})
-    return FileResponse(str(path), filename=filename, media_type=media.get(ext, "application/octet-stream"))
+    return FileResponse(str(path), filename=filename, media_type=media.get(ext, "application/octet-stream"),
+                        background=BackgroundTask(remove_exports, aid) if stale else None)
 
 
 @router.patch("/{aid}")

@@ -104,7 +104,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
     recent = await db.analyses.find(
         req_scope,
         {"_id": 0, "id": 1, "mode": 1, "mode_label": 1, "status": 1, "created_at": 1,
-         "issues_found": 1, "project_id": 1, "quality_score": 1},
+         "issues_found": 1, "project_id": 1, "quality_score": 1, "title": 1, "project_name": 1},
     ).sort("created_at", -1).to_list(8)
 
     return {

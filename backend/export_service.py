@@ -12,6 +12,7 @@ import io
 import logging
 import os
 import re
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from functools import lru_cache
@@ -719,13 +720,15 @@ def remove_exports(aid: str) -> None:
             pass
 
 
-_FILENAME_UNSAFE_RE = re.compile(r"[^\w\-]+")
-
-
 def download_name(*parts: str) -> str:
-    """'Tower C', 'Master MTO Engine' -> 'Tower_C_Master_MTO_Engine' (letters in any script kept)."""
-    joined = "_".join(p for p in parts if p)
-    return _FILENAME_UNSAFE_RE.sub("_", joined).strip("_") or "report"
+    """'Tower C', 'Master MTO Engine' -> 'Tower_C_Master_MTO_Engine'.
+
+    Letters, combining marks and digits in any script are kept (Hindi, Thai, accents);
+    everything else, including quotes and line breaks, becomes '_'.
+    """
+    joined = unicodedata.normalize("NFC", "_".join(p for p in parts if p))
+    safe = "".join(c if unicodedata.category(c)[0] in "LMN" or c in "-_" else "_" for c in joined)
+    return re.sub(r"_+", "_", safe).strip("_") or "report"
 
 
 def generate_export(fmt: str, content: str, meta: dict) -> str:

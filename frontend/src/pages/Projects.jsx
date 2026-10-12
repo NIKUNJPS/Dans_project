@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
 import { ProjectEditDialog, deleteProjectForever } from "@/components/projects/ProjectEditDialog";
 
 export default function Projects() {
@@ -25,6 +26,8 @@ export default function Projects() {
     const [saving, setSaving] = useState(false);
     const [editing, setEditing] = useState(null);
     const nav = useNavigate();
+    const { user } = useAuth();
+    const isOwner = (p) => user?.role === "super_admin" || p.owner_id === user?.id;
 
     const removeProject = async (p) => {
         if (await deleteProjectForever(p)) setProjects((list) => list.filter((x) => x.id !== p.id));
@@ -220,6 +223,7 @@ export default function Projects() {
                                     {p.team_members?.length ?? 0} members
                                 </div>
                             </Link>
+                            {isOwner(p) && (
                             <div className="flex items-center justify-end gap-4 border-t border-ink-line px-6 py-2">
                                 <button
                                     onClick={() => setEditing(p)}
@@ -236,6 +240,7 @@ export default function Projects() {
                                     <Trash2 size={12} /> Delete
                                 </button>
                             </div>
+                            )}
                             </div>
                         ))}
                     </div>

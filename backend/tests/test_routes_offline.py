@@ -237,3 +237,45 @@ def test_project_create_rename_delete(client, tmp_path):
     assert client.delete(f"/api/projects/{p['id']}?hard=true").status_code == 200
     assert client.get(f"/api/projects/{p['id']}").status_code == 404
     assert client.get(f"/api/analyses/{a['id']}").status_code == 404
+
+
+def test_old_quick_reports_get_named_and_renames_during_a_run_are_kept(client, tmp_path, monkeypatch):
+    import asyncio
+    from urllib.parse import unquote
+
+    import db as dbm
+    from routes.analyses import backfill_report_titles
+
+    f = _upload(client, _binder(tmp_path / "Harbour Bid Set.pdf", pages=5))
+
+    # A Quick Analysis saved before reports had names.
+    async def legacy():
+        await dbm._db.analyses.insert_one({
+            "id": "legacy1", "project_id": None, "project_name": "Quick Analysis", "file_ids": [f["id"]],
+            "requested_by": "u1", "mode": "SUMMARIZER", "mode_label": "Quick Summary", "status": "complete",
+            "output_markdown": "## Summary\nOld report.", "blockchain_hash": "x", "exports": []})
+        return await backfill_report_titles(dbm._db)
+    assert asyncio.run(legacy()) == 1
+    assert client.get("/api/analyses/legacy1").json()["title"] == "Harbour Bid Set"
+    r = client.get("/api/analyses/legacy1/export/markdown")
+    assert "Harbour_Bid_Set_" in unquote(r.headers["content-disposition"]) and "**Report:** Harbour Bid Set" in r.text
+
+    # Renamed while the analysis is still running: the exports carry the new name.
+    original = pipeline.run_batch
+
+    async def rename_mid_run(**kw):
+        aid = (await dbm._db.analyses.find_one({"status": {"$ne": "complete"}}, {"_id": 0, "id": 1}))["id"]
+        await dbm._db.analyses.update_one({"id": aid}, {"$set": {"title": "Renamed Mid Run"}})
+        return await original(**kw)
+    monkeypatch.setattr(pipeline, "run_batch", rename_mid_run)
+    aid = client.post("/api/analyses", json={"file_ids": [f["id"]], "mode": "SUMMARIZER", "title": "Before"}).json()["id"]
+    md = client.get(f"/api/analyses/{aid}/export/markdown")
+    assert "**Report:** Renamed Mid Run" in md.text
+
+
+def test_download_names_keep_every_script():
+    from export_service import download_name
+    assert download_name("टावर परियोजना", "MTO") == "टावर_परियोजना_MTO"
+    assert download_name("Résumé", "MTO") == "Résumé_MTO"
+    assert download_name('a"b\r\n;c', "") == "a_b_c"
+    assert download_name("", "") == "report"

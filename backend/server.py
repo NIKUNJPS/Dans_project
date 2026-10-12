@@ -11,7 +11,7 @@ from cleanup import sweep_unused
 from config import settings
 from db import ensure_indexes, get_client, get_db
 from routes.admin import router as admin_router
-from routes.analyses import router as analyses_router
+from routes.analyses import backfill_report_titles, router as analyses_router
 from routes.auth import router as auth_router
 from routes.estimation import router as estimation_router
 from routes.files import router as files_router
@@ -100,6 +100,12 @@ async def _auto_sweep_loop():
 async def on_startup():
     await ensure_indexes()
     await seed_admin()
+    try:
+        named = await backfill_report_titles(get_db())
+        if named:
+            logger.info("report_titles_backfilled count=%d", named)
+    except Exception:  # noqa: BLE001 — naming old reports must never block startup
+        logger.exception("report_title_backfill_failed")
     global _sweep_task
     if settings.auto_sweep_enabled:
         _sweep_task = asyncio.create_task(_auto_sweep_loop())

@@ -65,7 +65,9 @@ export const fileBase = (...parts) =>
     parts
         .filter(Boolean)
         .join("_")
-        .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+        .normalize("NFC")
+        .replace(/[^\p{L}\p{M}\p{N}_-]+/gu, "_")
+        .replace(/_+/g, "_")
         .replace(/^_+|_+$/g, "") || "report";
 
 /**

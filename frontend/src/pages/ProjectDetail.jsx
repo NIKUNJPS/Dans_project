@@ -15,6 +15,7 @@ import {
 import { api, errMessage } from "@/lib/api";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAuth } from "@/context/AuthContext";
 import { ProjectEditDialog, deleteProjectForever } from "@/components/projects/ProjectEditDialog";
 
 export default function ProjectDetail() {
@@ -26,6 +27,7 @@ export default function ProjectDetail() {
     const [rfis, setRfis] = useState([]);
     const [loading, setLoading] = useState(true);
     const [editOpen, setEditOpen] = useState(false);
+    const { user } = useAuth();
 
     const load = async () => {
         try {
@@ -144,6 +146,8 @@ export default function ProjectDetail() {
                         )}
                     </div>
                     <div className="flex flex-wrap gap-3">
+                        {(user?.role === "super_admin" || project.owner_id === user?.id) && (
+                        <>
                         <button
                             onClick={() => setEditOpen(true)}
                             data-testid="project-edit-btn"
@@ -160,6 +164,8 @@ export default function ProjectDetail() {
                             <Trash2 size={14} />
                             Delete project
                         </button>
+                        </>
+                        )}
                         <Link
                             to={`/projects/${id}/analyze`}
                             data-testid="project-analyze-btn"
