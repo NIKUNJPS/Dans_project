@@ -126,7 +126,9 @@ async def _run_all_batches(
                 )
                 break
             except EngineError as exc:
-                if attempt == 2:
+                if attempt == 2 or "usage limit" in str(exc):
+                    if "usage limit" in str(exc):
+                        raise
                     raise EngineError(f"Batch {batch.index} of {total} ({batch.describe()}) failed: {exc}") from exc
                 logger.warning("batch_retry label=%s batch=%d error=%s", label, batch.index, exc)
         async with lock:
