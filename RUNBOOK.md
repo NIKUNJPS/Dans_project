@@ -39,9 +39,14 @@ The preview environment already has everything wired. For production, set these 
 | `MONGO_URL` | Mongo connection string | Mongo Atlas → cluster → Connect → Application |
 | `DB_NAME` | Mongo database name | Your choice (e.g. `structmind_prod`) |
 | `ANTHROPIC_API_KEY` | **Required.** Claude API key that runs every analysis | console.anthropic.com → API Keys |
-| `ANTHROPIC_MODEL` / `ANTHROPIC_FALLBACK_MODEL` | Optional. Default `claude-sonnet-5-5` for every analysis, no fallback. Leave both unset (or set `ANTHROPIC_MODEL=claude-sonnet-5-5`); an old `ANTHROPIC_MODEL=claude-opus-5-5` overrides the default. The server logs `claude_models chain=[...]` at startup | — |
-| `ANTHROPIC_EFFORT` | Optional. Reasoning depth, default `high` (`xhigh`/`max` = slower, deeper) | — |
-| `ANTHROPIC_SERVER_FALLBACK` | Optional, default `true`. Set `false` on Bedrock / Vertex / Foundry | — |
+| `ANTHROPIC_MODEL` | Optional. Default `claude-opus-5-5` — the ONE model for every step; there is no fallback model. The server logs `claude_model model=...` at startup and stores the serving model on every report (`model_id`) | — |
+| `ANTHROPIC_EFFORT` / `ANTHROPIC_EFFORT_TAKEOFF` | Optional. Reasoning depth: narrative reports default `high`; take-off and estimation default `max` | — |
+| `ANTHROPIC_CAPACITY_WAIT_MINUTES` | Optional, default `45`. A call retries 429 / 5xx / 529 on the same model this long ("Waiting for model capacity") | — |
+| `ANTHROPIC_REQUEUE_ATTEMPTS` / `ANTHROPIC_REQUEUE_DELAY_MINUTES` | Optional, default `3` / `15`. After the wait the job goes back to the queue and retries later — never on another model | — |
+| `VISION_TILING` | Optional, `auto` (default) / `all` / `off`. High-resolution page tiles (2×2 / 3×3, overlap) for structural, image-only and metals-bearing sheets | — |
+| `VISION_TILE_PX` / `VISION_MAX_IMAGES` / `VISION_BATCH_PAGES` | Optional, `2576` / `80` / `8`. Tile long edge, images per call, tiled pages per call | — |
+| `GLYPH_MAP_PATH` | Optional. Editable fraction-glyph map (default `backend/rules/glyph_map.json`: É=1/8 … Ó=3/4, £=PL) | — |
+| `DETAILING_RATES_JSON` / `DETAILING_RATES_FILE` | Optional. Confidential detailing rates, e.g. `{"USA":["USD",18,28]}`; never printed in any report | — |
 | `BINDER_BATCH_PAGES` / `BINDER_BATCH_MB` | Optional. Page batch size, default 25 pages / 28 MB per Claude call | — |
 | `BATCH_CONCURRENCY` / `MAX_PARALLEL_CLAUDE_CALLS` | Optional. Batches read in parallel per analysis (4) and process-wide (8). Lower them if you hit API rate limits | — |
 | `JWT_SECRET` | JWT signing key | Generate: `python -c "import secrets;print(secrets.token_urlsafe(64))"` |
@@ -185,7 +190,7 @@ Change these via env vars (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, etc.) before your re
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Login works but "/admin/users 403" | User role is detailer/fabricator, not super_admin | Re-seed via env vars or `db.users.updateOne({email}, {$set:{role:"super_admin"}})` |
-| Analysis / estimate fails with "All STRUCTMIND CORE tiers failed" | Claude API errors after retries (invalid key, rate limit, outage) | Check `ANTHROPIC_API_KEY`, your Anthropic console usage limits, and lower `BATCH_CONCURRENCY` if the log shows 429 rate limits |
+| Analysis fails with "STRUCTMIND CORE could not complete this step" or "capacity stayed unavailable" | Claude API errors (invalid key, model not enabled for the key, long outage) | Check `ANTHROPIC_API_KEY`, your Anthropic console usage limits, and lower `BATCH_CONCURRENCY` if the log shows 429 rate limits |
 | "No analysis modes enabled" empty state | Super admin hasn't enabled any modes for that user | Admin → Permissions → toggle modes in AI modes section |
 | OTP not arriving | Email provider not configured | Set `RESEND_API_KEY` (+ verified `SMTP_FROM`) in the backend env. With no provider the code logs the OTP to the backend console as a dev fallback; in production a failed send now returns a 502 so the user is told to retry rather than getting a silent "code sent". |
 | File upload returns 413 | User's `maxFileSizeMb` cap exceeded | Admin → Permissions → increase Max file size |
@@ -205,7 +210,7 @@ Change these via env vars (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, etc.) before your re
 │   ├── seed.py                         (super_admin seeding + legacy role migration)
 │   ├── db.py                           (Mongo client + indexes)
 │   ├── config.py                       (env loader)
-│   ├── claude_engine.py                (Claude API: Files API, streaming, continuation, model + refusal fallback)
+│   ├── claude_engine.py                (Claude API: Opus 5.5 only, capacity queue, Files API, streaming, continuation, batch split on truncation)
 │   ├── binder.py                       (splits a multi-PDF binder into page batches + manifest)
 │   ├── pipeline.py                     (one binder in → ONE report out: take-off, estimates, map→consolidate)
 │   ├── pdf_repair.py                   (rewrite / rasterize tiers for PDFs Claude rejects)
@@ -292,7 +297,7 @@ Upload drawings, set the LOW/HIGH rate band, and get the full report with a PDF 
 Gated by the existing `canRunEstimation` permission and `estimationCountries`.
 
 > Bring your own key: set `ANTHROPIC_API_KEY` in the backend env (see PART 1 ②). The engine
-> uses Claude (Sonnet 5.5 primary → Opus 5.5 fallback) and reads that key automatically.
+> uses Claude Opus 5.5 for every step (no fallback model) and reads that key automatically.
 
 ### ③ Unused projects are cleaned up
 - **Hard delete:** `DELETE /api/projects/{id}?hard=true` permanently removes a project and
@@ -357,8 +362,8 @@ confidence banding and the cleanup date logic. Run: `pytest tests/test_estimatio
   The Estimate page now runs as a background job (no gateway time-outs on large binders).
 
 ### ③ Claude engine
-- Default `claude-sonnet-5-5` for every call (adaptive thinking, effort `high`, 128K streamed output),
-  no cross-model fallback unless `ANTHROPIC_FALLBACK_MODEL` is set, server-side refusal fallback, Files API v1 (`client.files`), prompt caching on
+- `claude-opus-5-5` for every call (adaptive thinking; effort `max` for take-off / estimation, `high` otherwise;
+  128K streamed output), no fallback model of any kind, capacity queue + re-queue, Files API v1 (`client.files`), prompt caching on
   the system prompt and drawings. SDK pinned: `anthropic==1.11.0` (requires `idna>=3.18`).
 
 ### ④ History & print

@@ -24,6 +24,11 @@ BASELINE OUTPUT RULES — APPLY TO EVERY ANALYSIS (the MODE's own rules win on a
 8.  Internal pricing, billing rates and confidential commercial figures never appear in output;
     where a MODE marks a field [CONFIDENTIAL], that string is its only value.
 9.  If the user's instructions conflict with a MODE rule, the MODE rule wins.
+10. Tonnage is "Estimated Tonnage": USA in tons on the 2,000 lb basis, elsewhere in tonnes (t).
+    Never write "short ton" or "short tons".
+11. Never compare with earlier runs, previous versions of this report or other estimates, and
+    never mention AI, language models, or how the report was produced.
+12. Hourly rates never appear; a rate field reads [CONFIDENTIAL].
 """
 
 # Optional reference blocks — currently unused by the runtime but available for

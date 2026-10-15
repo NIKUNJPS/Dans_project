@@ -15,6 +15,11 @@ This module splits by PAGE:
   3. The pieces are packed, IN DOCUMENT ORDER, into batches bounded by pages and MB, so
      each batch is a contiguous slice of the binder and sheet order is preserved.
 
+Vision tiles (ingest.py) ride along with their page: a PDF with tiled pages is cut into
+page ranges whose IMAGE budget (each page + each of its tiles) stays within
+VISION_MAX_IMAGES, and each range is followed by the tiles of its pages, so a page and its
+high-resolution crops always reach the model in the same call.
+
 The plan also carries a BINDER MANIFEST (every document, its page count, and where each
 batch sits) that is given to the model on every call — each batch knows it is part of a
 larger set, and the consolidation step knows the whole binder was covered.
@@ -44,6 +49,11 @@ _IMAGE_TARGET_PX = 3600
 # is split (on line boundaries) into parts no larger than _TEXT_PART_BYTES.
 _TEXT_BYTES_PER_PAGE = 40_000
 _TEXT_PART_BYTES = 200_000
+# Vision tiles: images per call (each PDF page counts 1, each tile 1), tiled pages per call,
+# and a byte budget for the tile images of one call (they go through the Files API).
+DEFAULT_MAX_IMAGES = int(os.environ.get("VISION_MAX_IMAGES", "80"))
+DEFAULT_TILED_PAGES = int(os.environ.get("VISION_BATCH_PAGES", "8"))
+DEFAULT_TILE_MB = float(os.environ.get("VISION_BATCH_TILE_MB", "150"))
 
 _MB = 1024 * 1024
 
@@ -63,6 +73,8 @@ class Unit:
 
     @property
     def pages(self) -> int:
+        if self.is_tile:
+            return 0
         return max(1, self.page_end - self.page_start + 1)
 
     @property
@@ -71,10 +83,19 @@ class Unit:
 
     part: int = 0          # text files split into parts: 1-based part number
     parts: int = 0
+    caption: str = ""      # vision tile: caption shown to the model next to the image
+    is_tile: bool = False  # a rendered crop of a page that is attached in the same batch
+
+    @property
+    def images(self) -> int:
+        """Images this unit adds to a call (a tile is one image; pages are one each)."""
+        return 1 if self.is_tile else self.pages
 
     @property
     def title(self) -> str:
         """Document title shown to the model for this attachment."""
+        if self.caption:
+            return self.caption
         if self.parts > 1:
             return f"D{self.doc_index} {self.doc_name} — part {self.part} of {self.parts}"
         if self.is_pdf and self.doc_pages > 1:
@@ -96,10 +117,26 @@ class Batch:
 
     @property
     def size_bytes(self) -> int:
-        return sum(u.size_bytes for u in self.units)
+        return sum(u.size_bytes for u in self.units if not u.is_tile)
+
+    @property
+    def images(self) -> int:
+        return sum(u.images for u in self.units)
+
+    @property
+    def tile_bytes(self) -> int:
+        return sum(u.size_bytes for u in self.units if u.is_tile)
 
     def describe(self) -> str:
-        return "; ".join(u.title for u in self.units)
+        return describe_units(self.units)
+
+
+def describe_units(units: list[Unit]) -> str:
+    """'D1 S.pdf — pages 1-8 of 40 + 36 vision tiles' (tiles are summarised, not listed)."""
+    docs = [u.title for u in units if not u.is_tile]
+    tiles = sum(1 for u in units if u.is_tile)
+    text = "; ".join(docs)
+    return f"{text} + {tiles} high-resolution vision tile{'s' if tiles != 1 else ''}" if tiles else text
 
 
 @dataclass
@@ -148,6 +185,7 @@ class BinderPlan:
             "total_pages": self.total_pages,
             "total_mb": self.total_mb,
             "batches": len(self.batches),
+            "vision_tiles": sum(b.images - b.pages for b in self.batches),
             "skipped": list(self.skipped),
         }
 
@@ -240,6 +278,98 @@ def _split_pdf(path: str, doc_index: int, doc_name: str, total_pages: int, max_p
     return units
 
 
+def _tile_ranges(total_pages: int, doc_tiles: dict[int, list[dict]], max_pages: int, max_images: int,
+                 tiled_pages: int, tile_bytes: int) -> list[tuple[int, int]]:
+    """Greedy contiguous page ranges whose image / tiled-page / tile-byte budgets fit."""
+    ranges: list[tuple[int, int]] = []
+    start, pages, images, tiled, nbytes = 1, 0, 0, 0, 0
+    for p in range(1, total_pages + 1):
+        tl = doc_tiles.get(p) or []
+        cost = 1 + len(tl)
+        tb = sum(int(t.get("bytes") or 0) for t in tl)
+        if pages and (pages + 1 > max_pages or images + cost > max_images
+                      or (tl and tiled + 1 > tiled_pages) or (tl and nbytes + tb > tile_bytes)):
+            ranges.append((start, p - 1))
+            start, pages, images, tiled, nbytes = p, 0, 0, 0, 0
+        pages += 1
+        images += cost
+        tiled += 1 if tl else 0
+        nbytes += tb
+    ranges.append((start, total_pages))
+    return ranges
+
+
+def _tile_unit(tile: dict, doc_index: int, doc_name: str, doc_pages: int, page: int, k: int, n: int) -> Unit | None:
+    path = tile.get("path") or ""
+    if not path or not os.path.exists(path):
+        return None
+    where = tile.get("position") or f"r{tile.get('row', 0) + 1}c{tile.get('col', 0) + 1}"
+    ppf = tile.get("px_per_ft") or {}
+    scale = "; ".join(f"{k2} = {v:.1f} px/ft" for k2, v in list(ppf.items())[:3] if isinstance(v, (int, float)))
+    dpi = tile.get("dpi")
+    caption = (f"D{doc_index} {doc_name} — page {page} · tile {k} of {n} ({where})"
+               + (f" · {dpi:.0f} dpi" if isinstance(dpi, (int, float)) else "")
+               + (f" · {scale}" if scale else ""))
+    mime = "image/jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    return Unit(path, mime, doc_index, doc_name, doc_pages, page, page, os.path.getsize(path),
+                caption=caption, is_tile=True)
+
+
+def _split_pdf_tiled(path: str, doc_index: int, doc_name: str, total_pages: int, size: int,
+                     doc_tiles: dict[int, list[dict]], max_pages: int, max_bytes: int, max_images: int,
+                     tiled_pages: int, tile_bytes: int, out_dir: str) -> list[list[Unit]] | None:
+    """Page ranges of a PDF that has vision tiles; each group = [range unit, its tiles...]."""
+    try:
+        reader = _open_pdf(path)
+        if reader is None:
+            return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pdf_open_failed path=%s error=%s", path, exc)
+        return None
+    groups: list[list[Unit]] = []
+
+    def tiles_for(a: int, b: int) -> list[Unit]:
+        out = []
+        for p in range(a, b + 1):
+            tl = doc_tiles.get(p) or []
+            for k, t in enumerate(tl, 1):
+                u = _tile_unit(t, doc_index, doc_name, total_pages, p, k, len(tl))
+                if u:
+                    out.append(u)
+        return out
+
+    def emit(a: int, b: int) -> None:
+        if a == 1 and b == total_pages and size <= max_bytes:
+            groups.append([Unit(path, "application/pdf", doc_index, doc_name, total_pages, 1, total_pages, size)]
+                          + tiles_for(a, b))
+            return
+        out_path = os.path.join(out_dir, f"d{doc_index:02d}_p{a:04d}-{b:04d}.pdf")
+        written = _write_pdf_range(reader, a, b, out_path)
+        if written > max_bytes and b > a:
+            os.remove(out_path)
+            mid = (a + b) // 2
+            emit(a, mid)
+            emit(mid + 1, b)
+            return
+        groups.append([Unit(out_path, "application/pdf", doc_index, doc_name, total_pages, a, b, written,
+                            is_temp=True)] + tiles_for(a, b))
+
+    try:
+        for a, b in _tile_ranges(total_pages, doc_tiles, max_pages, max_images, tiled_pages, tile_bytes):
+            emit(a, b)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pdf_tiled_split_failed path=%s error=%s", path, exc)
+        for g in groups:
+            for u in g:
+                if u.is_temp:
+                    try:
+                        os.remove(u.path)
+                    except OSError:
+                        pass
+        return None
+    return groups
+
+
 def _fit_image(path: str, mime: str, out_dir: str, doc_index: int) -> tuple[str, str, bool]:
     """Re-encode an oversized image so the API accepts it. Returns (path, mime, is_temp)."""
     try:
@@ -302,17 +432,23 @@ def plan_binder(
     max_mb: float | None = None,
     skipped: list[str] | None = None,
     scratch_root: str | None = None,
+    tiles: dict[tuple[int, int], list[dict]] | None = None,
+    max_images: int | None = None,
 ) -> BinderPlan:
     """Plan the batches for a set of prepared files.
 
     files: (path, mime, display_name) in the order the user uploaded them.
+    tiles: optional {(doc_index, page): [tile dicts from ingest.render_tiles]} — attached
+    right after the page range that holds their page, in the same batch.
     """
     max_pages = max(1, int(max_pages or DEFAULT_BATCH_PAGES))
     max_bytes = int((max_mb or DEFAULT_BATCH_MB) * _MB)
+    max_images = max(2, int(max_images or DEFAULT_MAX_IMAGES))
+    tile_budget = int(DEFAULT_TILE_MB * _MB)
     temp_dir = tempfile.mkdtemp(prefix="binder_", dir=scratch_root)
 
     documents: list[dict] = []
-    units: list[Unit] = []
+    groups: list[list[Unit]] = []        # packing groups: a page range and its tiles stay together
     for idx, (path, mime, name) in enumerate(files, 1):
         if not os.path.exists(path):
             logger.warning("binder_missing_file path=%s", path)
@@ -323,12 +459,17 @@ def plan_binder(
         pages = 1
         doc_units: list[Unit] | None = None
 
+        doc_groups: list[list[Unit]] | None = None
         if mime == "application/pdf":
             counted = count_pdf_pages(path)
             pages = counted or 1
-            if counted and (counted > max_pages or size > max_bytes):
+            doc_tiles = {p: tl for (d, p), tl in (tiles or {}).items() if d == idx and tl}
+            if counted and doc_tiles:
+                doc_groups = _split_pdf_tiled(path, idx, name, counted, size, doc_tiles, max_pages, max_bytes,
+                                              max_images, DEFAULT_TILED_PAGES, tile_budget, temp_dir)
+            if not doc_groups and counted and (counted > max_pages or size > max_bytes):
                 doc_units = _split_pdf(path, idx, name, counted, max_pages, max_bytes, temp_dir)
-            if not doc_units:
+            if not doc_groups and not doc_units:
                 doc_units = [Unit(path, mime, idx, name, pages, 1, pages, size)]
         elif mime.startswith("image/"):
             fitted, fmime, is_temp = _fit_image(path, mime, temp_dir, idx)
@@ -341,22 +482,29 @@ def plan_binder(
             "index": idx, "name": name, "mime": mime, "pages": pages,
             "size_bytes": size, "size_mb": round(size / _MB, 2),
         })
-        units.extend(doc_units)
+        groups.extend(doc_groups or [[u] for u in doc_units or []])
 
-    # Pack units into batches in binder order.
+    # Pack groups into batches in binder order.
     batches: list[Batch] = []
     current = Batch(index=1)
-    for u in units:
-        if current.units and (current.pages + u.pages > max_pages or current.size_bytes + u.size_bytes > max_bytes):
+    for g in groups:
+        g_pages = sum(u.pages for u in g)
+        g_bytes = sum(u.size_bytes for u in g if not u.is_tile)
+        g_images = sum(u.images for u in g)
+        g_tile_bytes = sum(u.size_bytes for u in g if u.is_tile)
+        if current.units and (current.pages + g_pages > max_pages or current.size_bytes + g_bytes > max_bytes
+                              or ((g_images > g_pages or current.images > current.pages)
+                                  and current.images + g_images > max_images)
+                              or current.tile_bytes + g_tile_bytes > tile_budget):
             batches.append(current)
             current = Batch(index=len(batches) + 1)
-        current.units.append(u)
+        current.units.extend(g)
     if current.units:
         batches.append(current)
 
     plan = BinderPlan(documents=documents, batches=batches, skipped=list(skipped or []), temp_dir=temp_dir)
     logger.info(
-        "binder_planned documents=%d pages=%d mb=%.1f batches=%d",
-        len(documents), plan.total_pages, plan.total_mb, len(batches),
+        "binder_planned documents=%d pages=%d mb=%.1f batches=%d tiles=%d",
+        len(documents), plan.total_pages, plan.total_mb, len(batches), sum(b.images - b.pages for b in batches),
     )
     return plan

@@ -830,7 +830,7 @@ Clash types: HARD (physical intersection) / SOFT (clearance violation) / MEP (cr
 # MODE 5 — FABRICATOR ESTIMATION PRO  (deterministic cost engine)
 # Runs on the shared take-off (estimation/takeoff.py — the same take-off the MTO Engine
 # reports for the same drawing set), then estimation/fab_estimate.py applies the rate
-# band (default USD 3,500 / 4,000 / 4,500 per short ton, or the user's rates), the
+# band (default USD 3,500 / 4,000 / 4,500 per ton (2,000 lb), or the user's rates), the
 # material x surface x assembly composite factor and tax, and renders the manifest and
 # Sections 1-10. Every figure is computed once, so all sections agree to the dollar.
 # The model receives the take-off prompt below; rates/factors stated in the user's
@@ -1884,7 +1884,7 @@ FABRICATOR_MODES: dict[str, dict] = {
         "group":       "Estimation and Bid",
         "description": (
             "Prices the member-by-member take-off of the whole binder (the same tonnage the MTO "
-            "Engine reports). Default band $3,500 / $4,000 / $4,500 per short ton or your own rates; "
+            "Engine reports). Default band $3,500 / $4,000 / $4,500 per ton (2,000 lb) or your own rates; "
             "material, surface and assembly factors; tax. Locked manifest, executive summary, basis, "
             "take-off tables 3A-3D, category cost build-up, process split, waterfall, assumptions "
             "and exclusions, optional client quotation — every figure computed, every section consistent."

@@ -275,7 +275,7 @@ export default function ProjectDetail() {
                                             {a.created_at ? new Date(a.created_at).toLocaleString() : ""}
                                             {a.takeoff_summary
                                                 ? ` · ${(a.takeoff_summary.jurisdiction || "USA") === "USA"
-                                                      ? `${Number(a.takeoff_summary.gross_short_tons || 0).toFixed(2)} sh tons`
+                                                      ? `${Number(a.takeoff_summary.est_tonnage ?? a.takeoff_summary.gross_short_tons ?? 0).toFixed(2)} tons`
                                                       : `${Number(a.takeoff_summary.gross_t || 0).toFixed(2)} t`}`
                                                 : ""}
                                         </div>

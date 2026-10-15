@@ -3,13 +3,20 @@
 Everything above this layer (binder batching, take-off, report consolidation) works in
 terms of `generate()` and `run_batch()`; nothing else imports the SDK.
 
-  • Model: claude-sonnet-5-5 for every call (ANTHROPIC_MODEL). An optional
-    ANTHROPIC_FALLBACK_MODEL runs only after the SDK's own retries (429 / 5xx /
-    connection) failed on the primary; none is set by default.
-  • Adaptive thinking at effort "high", set explicitly (Opus 5.5 would default to
-    "medium"), and 128K streamed output, so long take-offs rarely need a continuation.
-  • Server-side refusal fallback (`fallbacks: "default"`), so a false-positive safety
-    decline is re-run on another model inside the same call instead of failing the run.
+  • Model: claude-opus-5-5 for every call (settings.anthropic_model — the one place the
+    model is named). There is NO fallback model and no server-side model fallback: a
+    request is only ever answered by Opus 5.5, and the served model id is returned so it
+    is logged on every report.
+  • Capacity queue: 429 / 5xx / 529 / connection errors are retried with exponential
+    back-off for up to ANTHROPIC_CAPACITY_WAIT_MINUTES per call (the job shows "Waiting
+    for model capacity" meanwhile); after that CapacityUnavailable is raised and the job
+    is handed back to the queue by the caller — it never drops to another model.
+  • Adaptive thinking with an explicit effort: "max" for take-off and estimation
+    (settings.anthropic_effort_takeoff), settings.anthropic_effort for narrative reports,
+    and 128K streamed output per turn.
+  • Never truncated: output that is still incomplete after every continuation raises
+    OutputTruncated and run_batch() splits the batch in two (by attachment, then by page
+    range) so every table is completed in smaller pieces instead of being cut off.
   • Drawings go through the Files API (`client.files`) and are referenced by file_id with
     a human title ("D1 S-Structural.pdf — pages 26-50 of 120"); they are deleted after
     the batch. System prompt and attachments carry cache breakpoints, so parallel
@@ -23,9 +30,11 @@ terms of `generate()` and `run_batch()`; nothing else imports the SDK.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -41,31 +50,58 @@ logger = logging.getLogger(__name__)
 # Models
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL_CHAIN: list[str] = list(dict.fromkeys(
-    m for m in (settings.anthropic_model, settings.anthropic_fallback_model) if m
-))
-logger.info("claude_models chain=%s effort=%s", MODEL_CHAIN, settings.anthropic_effort)
+MODEL: str = settings.anthropic_model or "claude-opus-5-5"
+MODEL_CHAIN: list[str] = [MODEL]          # exactly one model; kept as a list for logging callers
+logger.info("claude_model model=%s effort=%s takeoff_effort=%s", MODEL,
+            settings.anthropic_effort, settings.anthropic_effort_takeoff)
 
 ENGINE_LABELS: dict[str, str] = {
-    "claude-fable-5-1": "STRUCTMIND CORE · APEX",
-    "claude-opus-5-5": "STRUCTMIND CORE · ULTRA",
-    "claude-opus-5": "STRUCTMIND CORE · ULTRA",
-    "claude-opus-4-8": "STRUCTMIND CORE · ULTRA",
-    "claude-sonnet-5-5": "STRUCTMIND CORE · PRO",
-    "claude-sonnet-5": "STRUCTMIND CORE · PRO",
-    "claude-haiku-4-5": "STRUCTMIND CORE · LITE",
+    "claude-opus-5-5": "STRUCTMIND CORE · PRO",
 }
+DEFAULT_ENGINE_LABEL = "STRUCTMIND CORE · PRO"
 
 MAX_OUTPUT_TOKENS = 128_000
 MAX_CONTINUATIONS = 12
-SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CAPACITY_BACKOFF_START = 15.0     # seconds; doubles per retry
+CAPACITY_BACKOFF_MAX = 300.0
+_CAPACITY_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=max(8, settings.max_parallel_calls * 2))
 _slots: dict[int, asyncio.Semaphore] = {}
 
 
 def engine_label(model: str) -> str:
-    return ENGINE_LABELS.get(model or "", "STRUCTMIND CORE")
+    """Client-facing engine name. Reports only ever say STRUCTMIND CORE · PRO."""
+    return ENGINE_LABELS.get(model or "", DEFAULT_ENGINE_LABEL)
+
+
+def effort_for(kind: str) -> str:
+    """Effort for a pipeline step: take-off / estimate at the highest effort."""
+    if kind in ("takeoff", "estimate"):
+        return settings.anthropic_effort_takeoff or "max"
+    return settings.anthropic_effort or "high"
+
+
+# A coroutine fn(label) the pipeline installs so a job waiting for capacity says so.
+_WAIT_HOOK: contextvars.ContextVar = contextvars.ContextVar("structmind_wait_hook", default=None)
+
+
+def set_wait_hook(fn) -> contextvars.Token:
+    return _WAIT_HOOK.set(fn)
+
+
+def reset_wait_hook(token: contextvars.Token) -> None:
+    _WAIT_HOOK.reset(token)
+
+
+async def _notify_wait(label: str) -> None:
+    hook = _WAIT_HOOK.get()
+    if hook is None:
+        return
+    try:
+        await hook(label)
+    except Exception:  # noqa: BLE001 — a progress update must never fail the call
+        logger.debug("wait_hook_failed", exc_info=True)
 
 
 def has_credentials() -> bool:
@@ -77,7 +113,7 @@ def get_client() -> anthropic.Anthropic:
         raise EngineError("No LLM credentials configured. Set ANTHROPIC_API_KEY in the backend environment.")
     return anthropic.Anthropic(
         api_key=settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY"),
-        max_retries=4,
+        max_retries=3,
         timeout=60 * 60,
     )
 
@@ -97,7 +133,16 @@ def _call_slot() -> asyncio.Semaphore:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class EngineError(RuntimeError):
-    """The engine could not produce an answer (after model fallback)."""
+    """The engine could not produce an answer."""
+
+
+class CapacityUnavailable(EngineError):
+    """The model stayed unavailable (429/5xx/529) for the whole capacity wait. The job
+    should be re-queued — never re-run on a different model."""
+
+
+class OutputTruncated(EngineError):
+    """The output was still incomplete after every continuation; split the batch."""
 
 
 class DocumentRejected(EngineError):
@@ -108,6 +153,14 @@ _DOC_ERROR_HINTS = (
     "pdf", "document", "could not process", "image", "file", "page", "too large",
     "prompt is too long", "exceed", "media", "corrupt", "password", "encrypted",
 )
+
+
+def _is_capacity_error(exc: Exception) -> bool:
+    if isinstance(exc, (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.OverloadedError,
+                        anthropic.ServiceUnavailableError, anthropic.DeadlineExceededError,
+                        anthropic.APIConnectionError)):
+        return True
+    return isinstance(exc, anthropic.APIStatusError) and getattr(exc, "status_code", 0) in _CAPACITY_STATUS
 
 
 def _is_document_error(exc: Exception) -> bool:
@@ -178,30 +231,42 @@ def _text_of_file(path: str) -> str:
         return data.decode("latin-1", errors="replace")
 
 
+def _upload_one(client: anthropic.Anthropic, u: Unit) -> list[Attachment]:
+    if u.mime.startswith("text/"):
+        return [Attachment({
+            "type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": _text_of_file(u.path)},
+            "title": u.title,
+        })]
+    with open(u.path, "rb") as fh:
+        info = client.files.upload(file=(_upload_name(u), fh, u.mime))
+    logger.info("upload_ready id=%s title=%s mb=%.1f", info.id, u.title, u.size_bytes / 1_048_576)
+    if u.mime.startswith("image/"):
+        out = []
+        if u.caption:
+            # Images carry no title field: the caption (page, tile position, px/ft) goes just before it.
+            out.append(Attachment({"type": "text", "text": u.caption}))
+        out.append(Attachment({"type": "image", "source": {"type": "file", "file_id": info.id}}, info.id))
+        return out
+    return [Attachment({"type": "document", "source": {"type": "file", "file_id": info.id}, "title": u.title}, info.id)]
+
+
 def _upload_sync(client: anthropic.Anthropic, units: list[Unit]) -> list[Attachment]:
-    """Upload the units of one batch. Text units are inlined (no upload needed)."""
-    out: list[Attachment] = []
-    try:
-        for u in units:
-            if u.mime.startswith("text/"):
-                out.append(Attachment({
-                    "type": "document",
-                    "source": {"type": "text", "media_type": "text/plain", "data": _text_of_file(u.path)},
-                    "title": u.title,
-                }))
-                continue
-            with open(u.path, "rb") as fh:
-                info = client.files.upload(file=(_upload_name(u), fh, u.mime))
-            if u.mime.startswith("image/"):
-                block = {"type": "image", "source": {"type": "file", "file_id": info.id}}
-            else:
-                block = {"type": "document", "source": {"type": "file", "file_id": info.id}, "title": u.title}
-            out.append(Attachment(block, info.id))
-            logger.info("upload_ready id=%s title=%s mb=%.1f", info.id, u.title, u.size_bytes / 1_048_576)
-    except Exception:
-        _delete_sync(client, out)
-        raise
-    return out
+    """Upload the units of one batch (in parallel, order kept). Text units are inlined."""
+    out: list[list[Attachment] | None] = [None] * len(units)
+    errors: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(units)))) as pool:
+        futures = {pool.submit(_upload_one, client, u): i for i, u in enumerate(units)}
+        for fut, i in futures.items():
+            try:
+                out[i] = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+    flat = [a for group in out if group for a in group]
+    if errors:
+        _delete_sync(client, flat)
+        raise errors[0]
+    return flat
 
 
 def _upload_name(u: Unit) -> str:
@@ -279,27 +344,56 @@ def _stream_once(client: anthropic.Anthropic, model: str, system_blocks: list, m
         output_config={"effort": effort},
         messages=messages,
     )
-    if settings.anthropic_server_fallback:
-        kwargs["betas"] = [SERVER_FALLBACK_BETA]
-        kwargs["fallbacks"] = "default"
     with client.beta.messages.stream(**kwargs) as stream:
         return stream.get_final_message()
+
+
+async def _stream_queued(client, model: str, system_blocks: list, messages: list, effort: str, label: str):
+    """One model turn, waiting in the capacity queue instead of failing or switching model.
+
+    The process-wide call slot is held only while a request is in flight, so a job that
+    is backing off does not block other users' calls.
+    """
+    loop = asyncio.get_running_loop()
+    deadline: float | None = None
+    delay = CAPACITY_BACKOFF_START
+    while True:
+        try:
+            async with _call_slot():
+                return await loop.run_in_executor(_EXECUTOR, _stream_once, client, model, system_blocks, messages, effort)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_capacity_error(exc) or _is_document_error(exc):
+                raise
+            now = time.monotonic()
+            if deadline is None:
+                deadline = now + max(0, settings.anthropic_capacity_wait_minutes) * 60
+            remaining = deadline - now
+            if remaining <= 0:
+                raise CapacityUnavailable(
+                    f"STRUCTMIND CORE capacity was unavailable for {settings.anthropic_capacity_wait_minutes} "
+                    f"minutes ({label}): {exc}") from exc
+            logger.warning("capacity_wait model=%s label=%s retry_in=%.0fs error=%s", model, label,
+                           min(delay, remaining), exc)
+            await _notify_wait(label)
+            await asyncio.sleep(min(delay, remaining))
+            delay = min(delay * 2, CAPACITY_BACKOFF_MAX)
 
 
 async def _generate_on_model(
     client: anthropic.Anthropic, model: str, system: str, content: list, label: str, effort: str,
 ) -> GenResult:
-    loop = asyncio.get_running_loop()
     system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     messages: list = [{"role": "user", "content": content}]
     usage = Usage()
     text = ""
     served_by = model
     for attempt in range(MAX_CONTINUATIONS + 1):
-        logger.info("claude_call model=%s label=%s attempt=%d", model, label, attempt)
-        msg = await loop.run_in_executor(_EXECUTOR, _stream_once, client, model, system_blocks, messages, effort)
+        logger.info("claude_call model=%s effort=%s label=%s attempt=%d", model, effort, label, attempt)
+        msg = await _stream_queued(client, model, system_blocks, messages, effort, label)
         usage.add_message(msg)
         served_by = getattr(msg, "model", None) or served_by
+        if served_by != model:
+            logger.warning("served_model_differs requested=%s served=%s label=%s", model, served_by, label)
         stop = getattr(msg, "stop_reason", None)
         if stop == "refusal":
             raise EngineError(f"The model declined this request ({label}).")
@@ -313,7 +407,7 @@ async def _generate_on_model(
             break
         if attempt == MAX_CONTINUATIONS:
             logger.warning("max_continuations_reached model=%s label=%s", model, label)
-            break
+            raise OutputTruncated(f"Output still incomplete after {MAX_CONTINUATIONS} continuations ({label}).")
         cont = (
             "Your previous message was cut off at the output limit. Continue EXACTLY where it "
             "stopped — if you stopped mid-line, output the rest of that line first with no "
@@ -331,23 +425,28 @@ async def generate(
     *, system: str, content: list, label: str, effort: str | None = None,
     client: anthropic.Anthropic | None = None,
 ) -> GenResult:
-    """Run one deliverable through the model chain. Raises DocumentRejected when the
-    attachments themselves were refused (the caller isolates/repairs them)."""
+    """Run one deliverable on the configured model (Opus 5.5 only).
+
+    Raises DocumentRejected when the attachments themselves were refused (the caller
+    isolates/repairs them), CapacityUnavailable when the model stayed busy for the whole
+    capacity wait (the caller re-queues the job), OutputTruncated when the output could
+    not be completed (the caller splits the batch) and EngineError otherwise.
+    """
     client = client or get_client()
     effort = effort or settings.anthropic_effort or "high"
-    last: Exception | None = None
-    for model in MODEL_CHAIN:
-        try:
-            async with _call_slot():
-                return await _generate_on_model(client, model, system, content, label, effort)
-        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
-            raise EngineError(f"The Anthropic API key was rejected: {exc}") from exc
-        except Exception as exc:  # noqa: BLE001
-            if _is_document_error(exc):
-                raise DocumentRejected(str(getattr(exc, "message", "") or exc)) from exc
-            last = exc
-            logger.warning("model_failed model=%s label=%s error=%s", model, label, exc)
-    raise EngineError(f"All STRUCTMIND CORE tiers failed ({label}). Last error: {last}")
+    try:
+        return await _generate_on_model(client, MODEL, system, content, label, effort)
+    except EngineError:
+        raise
+    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+        raise EngineError(f"The Anthropic API key was rejected: {exc}") from exc
+    except anthropic.NotFoundError as exc:
+        raise EngineError(f"The configured model is not available to this API key ({label}): {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        if _is_document_error(exc):
+            raise DocumentRejected(str(getattr(exc, "message", "") or exc)) from exc
+        logger.warning("model_failed model=%s label=%s error=%s", MODEL, label, exc)
+        raise EngineError(f"STRUCTMIND CORE could not complete this step ({label}): {exc}") from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -390,10 +489,12 @@ async def run_batch(
     try:
         res = await _run_units(client, system, header_for(units), units, label, effort)
         return [BatchOutput(res.text, units, res.model, res.usage)]
-    except DocumentRejected as exc:
+    except (DocumentRejected, OutputTruncated) as exc:
+        truncated = isinstance(exc, OutputTruncated)
         if len(units) > 1:
             mid = len(units) // 2
-            logger.warning("batch_rejected label=%s units=%d — bisecting (%s)", label, len(units), exc)
+            logger.warning("batch_%s label=%s units=%d — bisecting (%s)",
+                           "truncated" if truncated else "rejected", label, len(units), exc)
             first = await run_batch(system=system, header_for=header_for, units=units[:mid],
                                     label=f"{label}a", effort=effort)
             second = await run_batch(system=system, header_for=header_for, units=units[mid:],
@@ -403,7 +504,8 @@ async def run_batch(
         if unit.is_pdf and unit.pages > 1:
             halves = _halve_pdf_unit(unit)
             if halves:
-                logger.warning("unit_rejected label=%s — splitting %s", label, unit.title)
+                logger.warning("unit_%s label=%s — splitting %s", "truncated" if truncated else "rejected",
+                               label, unit.title)
                 try:
                     first = await run_batch(system=system, header_for=header_for, units=[halves[0]],
                                             label=f"{label}a", effort=effort)
@@ -416,6 +518,9 @@ async def run_batch(
                             os.remove(h.path)
                         except OSError:
                             pass
+        if truncated:
+            raise EngineError(f"'{unit.title}' produced more output than can be completed in one call "
+                              "even after splitting it to a single page.") from exc
         if unit.is_pdf:
             return [await _repair_and_run(client, system, header_for, unit, label, effort, exc)]
         raise DocumentRejected(

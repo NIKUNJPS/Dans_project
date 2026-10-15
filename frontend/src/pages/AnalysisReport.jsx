@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
     AlertOctagon,
+    Calculator,
+    CheckCircle2,
     ChevronRight,
     Download,
     Loader2,
@@ -9,8 +11,11 @@ import {
     Pencil,
     Printer,
     RotateCw,
+    ShieldAlert,
+    ShieldCheck,
     Sparkles,
     Trash2,
+    XCircle,
 } from "lucide-react";
 import { api, downloadFile, errMessage, fileBase } from "@/lib/api";
 import { toast } from "sonner";
@@ -202,6 +207,10 @@ export default function AnalysisReport() {
     const [titleDraft, setTitleDraft] = useState("");
     const [searchParams, setSearchParams] = useSearchParams();
     const autoPrinted = useRef(false);
+    const [releaseOpen, setReleaseOpen] = useState(false);
+    const [releaseReason, setReleaseReason] = useState("");
+    const [releasing, setReleasing] = useState(false);
+    const [creatingEstimate, setCreatingEstimate] = useState(false);
 
     const fetchIt = async () => {
         try {
@@ -258,19 +267,34 @@ export default function AnalysisReport() {
         }
     };
 
-    const printReport = () => window.print();
+    // A Master MTO / Estimation report whose quality gate failed is held: it can be
+    // reviewed on screen, but downloads and prints wait for a pass or the owner's release.
+    const held = analysis?.release_state === "blocked";
+    const printReport = () => {
+        if (held) {
+            toast.error("This report is held by the quality gate — review the failed checks first.");
+            return;
+        }
+        window.print();
+    };
 
     // "Print" on the Reports list or a project page opens the report with ?print=1:
     // print once the report has rendered, then drop the flag so a refresh doesn't reprint.
     const printTimer = useRef(null);
     useEffect(() => {
         if (analysis?.status !== "complete" || searchParams.get("print") !== "1" || autoPrinted.current) return;
+        if (analysis?.release_state === "blocked") {
+            autoPrinted.current = true;
+            toast.error("This report is held by the quality gate — it can be printed once it is released.");
+            setSearchParams({}, { replace: true });
+            return;
+        }
         autoPrinted.current = true;
         printTimer.current = setTimeout(() => {
             window.print();
             setSearchParams({}, { replace: true });
         }, 600);
-    }, [analysis?.status, searchParams, setSearchParams]);
+    }, [analysis?.status, analysis?.release_state, searchParams, setSearchParams]);
     useEffect(() => () => clearTimeout(printTimer.current), []);
 
     const reportName = analysis?.title || analysis?.project_name || "Quick Analysis";
@@ -304,7 +328,8 @@ export default function AnalysisReport() {
     const downloadExport = async (exp) => {
         setDownloading(exp.fmt);
         try {
-            const base = fileBase(reportName, analysis.mode_label || "report");
+            // Master MTO / Estimation: 4xtrsuct_Master_MTO_<Project> (named by the server).
+            const base = analysis.download_base || fileBase(reportName, analysis.mode_label || "report");
             await downloadFile(`/api/analyses/${id}/export/${exp.fmt}`, `${base}.${exp.ext}`);
         } catch (e) {
             toast.error(errMessage(e));
@@ -313,6 +338,32 @@ export default function AnalysisReport() {
         }
     };
 
+
+    const releaseReport = async () => {
+        setReleasing(true);
+        try {
+            await api.post(`/api/analyses/${id}/release`, { reason: releaseReason.trim() });
+            toast.success("Report released with exceptions");
+            setReleaseOpen(false);
+            setReleaseReason("");
+            fetchIt();
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+        setReleasing(false);
+    };
+
+    const createEstimation = async () => {
+        setCreatingEstimate(true);
+        try {
+            const { data } = await api.post(`/api/analyses/${id}/estimation`);
+            toast.success("Estimation report started — it reuses this MTO's take-off");
+            nav(`/analyses/${data.id}`);
+        } catch (e) {
+            toast.error(errMessage(e));
+        }
+        setCreatingEstimate(false);
+    };
 
     const createRfi = async () => {
         setCreatingRfi(true);
@@ -436,11 +487,24 @@ export default function AnalysisReport() {
                     </div>
 
                     <div className="no-print flex flex-wrap gap-2">
+                        {analysis.status === "complete" && analysis.doc_kind === "mto" && (
+                            <button
+                                onClick={createEstimation}
+                                disabled={creatingEstimate}
+                                data-testid="create-estimation-btn"
+                                className="btn-gold"
+                            >
+                                {creatingEstimate ? <Loader2 size={14} className="animate-spin" /> : <Calculator size={14} />}
+                                Create Estimation report
+                            </button>
+                        )}
                         {analysis.status === "complete" && (
                             <button
                                 onClick={printReport}
+                                disabled={held}
+                                title={held ? "Held by the quality gate" : "Print this report"}
                                 data-testid="print-report-btn"
-                                className="btn-ghost-navy"
+                                className="btn-ghost-navy disabled:cursor-not-allowed disabled:opacity-50"
                             >
                                 <Printer size={14} />
                                 Print
@@ -562,6 +626,13 @@ export default function AnalysisReport() {
                 <div className="container-steel py-10">
                     <ReportSummary analysis={analysis} />
 
+                    {analysis.quality_gate && (
+                        <QualityGatePanel
+                            analysis={analysis}
+                            onRelease={() => setReleaseOpen(true)}
+                        />
+                    )}
+
                     {/* Exports + Blockchain */}
                     <div className="no-print card-steel mt-6 p-6">
                         <div className="flex flex-wrap items-center justify-between gap-4">
@@ -570,6 +641,16 @@ export default function AnalysisReport() {
                                 <div className="mt-1 font-heading text-lg font-bold uppercase tracking-tight text-navy">
                                     Download report · SHA-256 anchored
                                 </div>
+                                {analysis.download_base && (
+                                    <div className="mt-1 font-mono text-[10px] tracking-wider text-ink-muted" data-testid="download-base">
+                                        {analysis.download_base}.docx
+                                    </div>
+                                )}
+                                {held && (
+                                    <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-destructive">
+                                        Downloads are held until the quality gate passes or the owner releases the report.
+                                    </div>
+                                )}
                             </div>
                             <BlockchainBadge hash={analysis.blockchain_hash} />
                         </div>
@@ -579,7 +660,8 @@ export default function AnalysisReport() {
                                     key={e.fmt}
                                     data-testid={`export-${e.fmt}`}
                                     onClick={() => downloadExport(e)}
-                                    disabled={downloading !== null}
+                                    disabled={downloading !== null || held}
+                                    title={held ? "Held by the quality gate" : `Download ${e.label}`}
                                     className="inline-flex items-center gap-2 border border-navy bg-white px-4 py-2 font-heading text-sm font-bold uppercase tracking-wider text-navy transition-colors hover:bg-navy hover:text-gold disabled:cursor-wait disabled:opacity-60"
                                 >
                                     {downloading === e.fmt ? (
@@ -634,6 +716,59 @@ export default function AnalysisReport() {
                                     </div>
                                 </section>
                             ))}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Release-with-exceptions modal */}
+            {releaseOpen && (
+                <div
+                    className="no-print fixed inset-0 z-50 flex items-center justify-center bg-navy/60 px-4"
+                    onClick={() => setReleaseOpen(false)}
+                >
+                    <div
+                        className="w-full max-w-lg border border-ink-line bg-white p-6"
+                        onClick={(e) => e.stopPropagation()}
+                        data-testid="release-dialog"
+                    >
+                        <div className="text-overline">Quality gate</div>
+                        <div className="mt-1 font-heading text-2xl font-black uppercase tracking-tight text-navy">
+                            Release with exceptions
+                        </div>
+                        <p className="mt-2 text-sm text-ink-muted">
+                            The failed checks and your reason are recorded on the report and in the audit log.
+                        </p>
+                        <ul className="mt-3 space-y-1 text-sm">
+                            {(analysis.quality_gate?.checks || [])
+                                .filter((c) => !c.passed)
+                                .map((c) => (
+                                    <li key={c.id} className="flex items-start gap-2 text-destructive">
+                                        <XCircle size={14} className="mt-0.5 shrink-0" /> {c.id}. {c.name}
+                                    </li>
+                                ))}
+                        </ul>
+                        <textarea
+                            data-testid="release-reason"
+                            value={releaseReason}
+                            onChange={(e) => setReleaseReason(e.target.value)}
+                            maxLength={1000}
+                            rows={4}
+                            placeholder="Why is this report fit to issue? (at least 10 characters)"
+                            className="mt-4 w-full border border-ink-line p-3 text-sm outline-none focus:border-gold"
+                        />
+                        <div className="mt-4 flex justify-end gap-2">
+                            <button onClick={() => setReleaseOpen(false)} className="btn-ghost-navy">
+                                Cancel
+                            </button>
+                            <button
+                                onClick={releaseReport}
+                                disabled={releasing || releaseReason.trim().length < 10}
+                                data-testid="release-confirm"
+                                className="btn-gold disabled:opacity-50"
+                            >
+                                {releasing ? "Releasing…" : "Release report"}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -740,18 +875,104 @@ function countRfis(md) {
     return new Set((md || "").match(/\bRFI-\d{2,4}\b/g) || []).size;
 }
 
+function QualityGatePanel({ analysis, onRelease }) {
+    const gate = analysis.quality_gate;
+    const checks = gate.checks || [];
+    const passed = checks.filter((c) => c.passed).length;
+    const state = analysis.release_state;
+    const rel = analysis.release;
+    const [open, setOpen] = useState(state === "blocked");
+    const tone =
+        state === "blocked"
+            ? "border-l-destructive"
+            : state === "released_with_exceptions"
+              ? "border-l-gold"
+              : "border-l-emerald-600";
+    return (
+        <div className={`print-section card-steel mt-6 border-l-4 p-6 ${tone}`} data-testid="quality-gate">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                    {state === "blocked" ? (
+                        <ShieldAlert size={22} className="text-destructive" />
+                    ) : (
+                        <ShieldCheck size={22} className={state === "released" ? "text-emerald-600" : "text-gold"} />
+                    )}
+                    <div>
+                        <div className="text-overline">Quality gate</div>
+                        <div className="font-heading text-lg font-bold uppercase tracking-tight text-navy" data-testid="quality-gate-state">
+                            {state === "blocked"
+                                ? `Held for review · ${passed} of ${checks.length} checks passed`
+                                : state === "released_with_exceptions"
+                                  ? `Released with exceptions · ${passed} of ${checks.length} checks passed`
+                                  : `Released · all ${checks.length} checks passed`}
+                        </div>
+                    </div>
+                </div>
+                <div className="no-print flex gap-2">
+                    <button onClick={() => setOpen((o) => !o)} className="btn-ghost-navy" data-testid="quality-gate-toggle">
+                        {open ? "Hide checks" : "Show checks"}
+                    </button>
+                    {analysis.can_release && (
+                        <button onClick={onRelease} className="btn-gold" data-testid="release-report-btn">
+                            Release with exceptions
+                        </button>
+                    )}
+                </div>
+            </div>
+            {rel && (
+                <div className="mt-3 text-sm text-ink-muted">
+                    Released by <span className="text-navy">{rel.by_name || "owner"}</span>
+                    {rel.at ? ` on ${new Date(rel.at).toLocaleString()}` : ""} — “{rel.reason}”
+                </div>
+            )}
+            {open && (
+                <ul className="mt-4 divide-y divide-ink-line border border-ink-line">
+                    {checks.map((c) => (
+                        <li key={c.id} className="flex items-start gap-3 p-3" data-testid={`gate-check-${c.id}`}>
+                            {c.passed ? (
+                                <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-600" />
+                            ) : (
+                                <XCircle size={16} className="mt-0.5 shrink-0 text-destructive" />
+                            )}
+                            <div className="min-w-0">
+                                <div className="font-heading text-sm font-bold uppercase tracking-wide text-navy">
+                                    {c.id}. {c.name}
+                                </div>
+                                {c.detail && <div className="text-sm text-ink-muted">{c.detail}</div>}
+                                {!c.passed && c.items?.length > 0 && (
+                                    <ul className="mt-1 list-disc pl-5 font-mono text-[11px] text-ink">
+                                        {c.items.slice(0, 12).map((it, i) => (
+                                            <li key={i} className="break-words">{it}</li>
+                                        ))}
+                                        {c.items.length > 12 && <li>… {c.items.length - 12} more</li>}
+                                    </ul>
+                                )}
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </div>
+    );
+}
+
 function ReportSummary({ analysis }) {
     const t = analysis.takeoff_summary;
     const e = analysis.estimate_summary;
     const usa = (t?.jurisdiction || "USA") === "USA";
     const tiles = [];
     if (t) {
+        const tons = t.est_tonnage ?? (usa ? t.gross_short_tons : t.gross_t);
         tiles.push(
             <SummaryTile
                 key="tons"
-                label="Estimated tonnage"
-                value={usa ? `${fmtNum(t.gross_short_tons, 2)} sh tons` : `${fmtNum(t.gross_t, 2)} t`}
-                sub={usa ? `${fmtNum(t.gross_t, 2)} metric t · ${fmtNum(t.gross_kg)} kg` : `${fmtNum(t.gross_short_tons, 2)} short tons · ${fmtNum(t.gross_kg)} kg`}
+                label="Estimated Tonnage"
+                value={usa ? `${fmtNum(tons, 2)} tons` : `${fmtNum(tons, 2)} t`}
+                sub={
+                    usa
+                        ? `2,000 lb basis · ${fmtNum(t.gross_lb ?? (t.gross_kg || 0) * 2.20462)} lbs`
+                        : `${fmtNum(t.gross_kg)} kg`
+                }
             />,
         );
     }

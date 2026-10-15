@@ -170,6 +170,12 @@ class AnalysisRename(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
 
+class AnalysisRelease(BaseModel):
+    """Owner's release of a report the quality gate held, with the reason on record."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+    reason: str = Field(min_length=10, max_length=1000)
+
+
 class AnalysisOut(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str

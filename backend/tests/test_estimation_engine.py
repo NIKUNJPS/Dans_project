@@ -49,7 +49,7 @@ def test_unit_weight_matches_published_tables(profile, jur, published, unit):
 
 
 def test_plate_weight_per_metre_and_unknowns():
-    assert abs(W.lookup_unit_weight("PL1/2x8", "USA") - 0.5 * 8 * W.LB_PER_FT_PER_IN2 * LBFT) < 0.01
+    assert abs(W.lookup_unit_weight("PL1/2x8", "USA") - 0.5 * 8 * 40.8 / 12 * LBFT) < 0.01
     assert abs(W.lookup_unit_weight("PL12x200", "CANADA") - 12 * 200 * 0.00785) < 0.01
     assert W.compute_unit_weight("GRATING 19-W-4", "USA") is None
     assert W.compute_unit_weight("", "USA") is None
@@ -134,7 +134,8 @@ def test_plan_count_not_added_when_schedule_has_same_pieces():
     t = _takeoff()
     b1_rows = [r for r in t["rows"] if r["mark"] == "B1"]
     assert len(b1_rows) == 1 and b1_rows[0]["method"] == "SCHEDULE"
-    assert any(r["type"] == "BOM-VS-DRAWING" for r in t["reconciliation"])
+    assert any(r["type"] == "BOM-VS-DRAWING" for r in t["duplicates"])
+    assert not any(r["type"] == "BOM-VS-DRAWING" for r in t["reconciliation"])
     assert t["stats"]["double_counts_removed"] == 1
 
 
@@ -192,14 +193,14 @@ def test_mto_report_has_all_outputs_and_consistent_totals():
         assert f"## {heading}" in md
     assert "18K4" not in md
     assert f"{t['totals']['pieces']:,}" in md
-    assert "TOTAL FABRICATED WEIGHT" in md
+    assert "ESTIMATED TONNAGE" in md and "short ton" not in md.lower()
 
 
 # ── fabricator estimate: every section agrees ───────────────────────────────
 def test_fabricator_estimate_locked_values_consistent():
     t = _takeoff()
     est = fab_estimate.compute(t)
-    assert est["ton_name"] == "short ton"
+    assert est["ton_name"] == "ton"
     assert est["tons_exact"] == pytest.approx(t["totals"]["gross_short_tons"])
     assert est["lock"]["low"] < est["lock"]["mid"] < est["lock"]["high"]
     assert est["lock"]["mid"] % 100 == 0

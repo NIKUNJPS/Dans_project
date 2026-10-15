@@ -1435,7 +1435,7 @@ DETAILER_MODES: dict[str, dict] = {
     "ESTIMATION_PRO": {
         "label":       "Estimation Pro — Hours-Based Quotation Engine",
         "group":       "Estimation & Bid",
-        "description": "Piece-count take-off from the full binder; base hours, complexity multipliers, risk buffer and confidential cost computed deterministically so every section agrees. USD / CAD / AUD.",
+        "description": "Hours-based quotation built from the Master MTO take-off (same quantities, reused when the MTO already ran): 2C base hours, complexity factors (cap x2.50), completeness buffer 5/10/20 %, locked hours and cost, quality-gated. USD / CAD / AUD.",
         "icon":        "Calculator",
         "time":        "~10-15 min",
         "prompt":      ESTIMATION_PRO,
@@ -1461,7 +1461,7 @@ DETAILER_MODES: dict[str, dict] = {
     "MTO": {
         "label":       "Master MTO Engine",
         "group":       "Take-off",
-        "description": "Member-by-member take-off of the whole binder; every weight computed (Qty x Length x unit weight), member count = Σ Qty, double counts removed, joists excluded, one consolidated report with reconciliation and RFIs. USA / Canada / Australia.",
+        "description": "Deterministic pre-read (sheet register, fraction glyphs, callout counts, metals sweep, high-res vision tiles) then a member-by-member take-off grouped by area; every weight computed, counted once, joists excluded, deck by area, Estimated Tonnage, RFIs for every assumption, quality-gated. USA / Canada / Australia.",
         "icon":        "Package",
         "time":        "~15-25 min",
         "prompt":      MTO,

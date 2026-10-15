@@ -421,8 +421,8 @@ export default function Estimation() {
                     <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         {isFab ? (
                             <Kpi
-                                label="Estimated tonnage"
-                                value={`${(ex.tonnage ?? 0).toLocaleString("en-US")} ${tonUnit === "short ton" ? "sh tons" : "t"}`}
+                                label="Estimated Tonnage"
+                                value={`${(ex.tonnage ?? 0).toLocaleString("en-US")} ${tonUnit === "short ton" ? "tons" : "t"}`}
                                 sub={`${rfis.length.toLocaleString("en-US")} RFIs`}
                             />
                         ) : (
@@ -485,9 +485,9 @@ export default function Estimation() {
                                             </tr>
                                         ))}
                                         <tr className="border-t-2 border-gold bg-gold-pale/40 font-bold">
-                                            <td className="px-3 py-2 text-navy">TOTAL FABRICATED</td>
+                                            <td className="px-3 py-2 text-navy">ESTIMATED TONNAGE</td>
                                             <td colSpan={2} className="px-3 py-2 text-navy">
-                                                {ex.tonnage_short !== undefined ? `${Number(ex.tonnage_short).toFixed(2)} short tons` : ""}
+                                                {ex.tonnage_short !== undefined ? `${Number(ex.tonnage_short).toFixed(2)} tons (2,000 lb basis)` : ""}
                                             </td>
                                             <td className="px-3 py-2 text-navy">{Math.round(ex.gross_kg || netKg).toLocaleString()}</td>
                                             <td className="px-3 py-2 text-navy">{Number(ex.tonnage_t ?? netKg / 1000).toFixed(3)}</td>

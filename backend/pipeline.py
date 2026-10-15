@@ -1,9 +1,13 @@
 """Analysis pipeline — one binder in, ONE report out.
 
-    files ──► binder plan (page batches, manifest)
-          ├─► MTO ...................... structured take-off per batch ─► Python consolidation ─► MTO report
-          ├─► Fabricator Estimation .... (same take-off, cached per drawing set) ─► cost engine ─► estimate
-          ├─► Detailer Estimation ...... piece-count per batch ─► Python hours/cost engine ─► estimate
+    files ──► ingestion pre-read (ingest.py: sheet register, text layer + glyph decode,
+          │     anchored callout counts, Division 05 metals sweep, scales, vision tiles)
+          ──► binder plan (page batches, manifest; each page's tiles in its batch)
+          ├─► MTO ...................... structured take-off per batch (with the page digests)
+          │                              ─► Python consolidation ─► Master MTO report
+          ├─► Estimation Pro ........... (same take-off, cached per drawing set) ─► 2C hours engine
+          │                              in code ─► Estimation report
+          ├─► Fabricator Estimation .... (same take-off) ─► cost engine ─► estimate
           └─► every other mode ......... one call when the binder fits one batch; otherwise
                                          map (each batch read in parallel, batch-aware framing)
                                          ─► consolidation call (one deliverable, recomputed totals)
@@ -18,18 +22,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from binder import BinderPlan, Unit, plan_binder
+from binder import BinderPlan, Unit, describe_units, plan_binder
 from claude_engine import (
     EngineError,
     Usage,
+    effort_for,
     engine_label,
     gather_limited,
     generate,
+    reset_wait_hook,
     run_batch,
+    set_wait_hook,
 )
 from config import settings
 from estimation import detailing_estimate, fab_estimate
@@ -44,6 +54,10 @@ from estimation.takeoff import (
 from report_merge import normalize_section_headings, parse_blocks, _table_to_md, _sig
 
 logger = logging.getLogger(__name__)
+
+# The deterministic pre-read (register, glyphs, callouts, metals sweep, tiles) runs before
+# every take-off. INGEST_ENABLED=false skips it (the model then reads the PDFs alone).
+INGEST_ENABLED = os.environ.get("INGEST_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 
 TAKEOFF_MODES = {"MTO"}
 FAB_ESTIMATE_MODES = {"FABRICATOR_ESTIMATION_PRO"}
@@ -65,6 +79,9 @@ class PipelineResult:
     markdown: str
     engine: str
     meta: dict = field(default_factory=dict)
+    takeoff: dict | None = None        # the take-off behind MTO / estimate reports (quality gate input)
+    estimate: dict | None = None       # the Estimation Pro dict (quality gate input)
+    model_id: str = ""                 # the model that actually served the calls
 
 
 async def _noop_progress(_label: str, _done: int, _total: int) -> None:
@@ -80,12 +97,12 @@ async def _never_cancel() -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _describe(units: list[Unit]) -> str:
-    return "; ".join(u.title for u in units)
+    return describe_units(units)
 
 
 async def _run_all_batches(
     plan: BinderPlan, *, system: str, header: Callable[[list[Unit], int, int], str], label: str,
-    progress: ProgressFn, cancelled: CancelFn, stage: str,
+    progress: ProgressFn, cancelled: CancelFn, stage: str, effort: str | None = None,
 ) -> tuple[list, Usage]:
     """Run every batch (parallel, bounded), retrying a failed batch once. Returns the
     flat list of BatchOutputs in binder order plus the accumulated usage."""
@@ -105,6 +122,7 @@ async def _run_all_batches(
                     header_for=lambda units, b=batch: header(units, b.index, total),
                     units=batch.units,
                     label=f"{label}-b{batch.index}",
+                    effort=effort,
                 )
                 break
             except EngineError as exc:
@@ -124,9 +142,31 @@ async def _run_all_batches(
     return flat, usage
 
 
-def _primary_engine(outputs) -> str:
+def _primary_model(outputs) -> str:
     models = [o.model for o in outputs if getattr(o, "model", None)]
-    return engine_label(max(set(models), key=models.count)) if models else engine_label("")
+    return max(set(models), key=models.count) if models else ""
+
+
+def _primary_engine(outputs) -> str:
+    return engine_label(_primary_model(outputs))
+
+
+def _batch_digest(ingest, units: list[Unit]) -> str:
+    """Pre-read digest of exactly the pages attached to this call."""
+    if ingest is None:
+        return ""
+    try:
+        from ingest import batch_digest
+
+        entries = []
+        for u in units:
+            if u.is_tile:
+                continue
+            entries.extend(ingest.entries_for(u.doc_index, u.page_start, u.page_end))
+        return batch_digest(entries) if entries else ""
+    except Exception as exc:  # noqa: BLE001 — the digest is an aid, never a blocker
+        logger.warning("batch_digest_failed error=%s", exc)
+        return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +176,7 @@ def _primary_engine(outputs) -> str:
 async def run_takeoff(
     plan: BinderPlan, *, user_text: str = "", jurisdiction_hint: str = "USA",
     progress: ProgressFn = _noop_progress, cancelled: CancelFn = _never_cancel, label: str = "takeoff",
+    ingest=None,
 ) -> tuple[dict, str, Usage]:
     if not plan.batches:
         raise EngineError("No readable drawings were uploaded.")
@@ -143,11 +184,12 @@ async def run_takeoff(
     manifest = plan.manifest_text()
 
     def header(units, idx, total):
-        return takeoff_batch_header(manifest, _describe(units), idx, total, user_text)
+        return takeoff_batch_header(manifest, _describe(units), idx, total, user_text,
+                                    digest=_batch_digest(ingest, units))
 
     outputs, usage = await _run_all_batches(
         plan, system=system, header=header, label=label, progress=progress, cancelled=cancelled,
-        stage="Taking off members",
+        stage="Taking off members", effort=effort_for("takeoff"),
     )
     batches = []
     for i, o in enumerate(outputs, 1):
@@ -157,11 +199,15 @@ async def run_takeoff(
             logger.warning("takeoff_batch_unparsed label=%s batch=%d chars=%d", label, i, len(o.text))
         batches.append({"batch": i, "meta": meta, "rows": rows})
     await progress("Computing tonnage", 1, 1)
-    takeoff = consolidate(batches, jurisdiction_hint=jurisdiction_hint, documents=plan.summary()["documents"])
+    takeoff = consolidate(batches, jurisdiction_hint=jurisdiction_hint, documents=plan.summary()["documents"],
+                          ingest=ingest)
     if not takeoff["rows"]:
         raise EngineError("No steel members could be taken off from the uploaded drawings.")
     takeoff["engine"] = _primary_engine(outputs)
+    takeoff["model_id"] = _primary_model(outputs)
     takeoff["binder"] = plan.summary()
+    if ingest is not None:
+        takeoff["ingest_summary"] = dict(getattr(ingest, "summary", {}) or {})
     return takeoff, takeoff["engine"], usage
 
 
@@ -186,45 +232,13 @@ async def extract_overrides(user_text: str) -> dict:
         return {}
     try:
         res = await generate(system=_OVERRIDES_SYSTEM, content=[{"type": "text", "text": text}],
-                             label="overrides", effort="low")
+                             label="overrides", effort="medium")
         m = re.search(r"\{.*\}", res.text, re.S)
         data = json.loads(m.group(0)) if m else {}
         return {k: v for k, v in data.items() if v not in (None, "", [], {})} if isinstance(data, dict) else {}
     except Exception as exc:  # noqa: BLE001 — overrides are optional
         logger.warning("override_extract_failed error=%s", exc)
         return {}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Detailer estimation
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def run_detailing_estimate(
-    plan: BinderPlan, *, user_text: str = "", region_hint: str = "USA",
-    progress: ProgressFn = _noop_progress, cancelled: CancelFn = _never_cancel, label: str = "detailing",
-) -> tuple[dict, str, Usage]:
-    system = detailing_estimate.detailing_system_prompt()
-    manifest = plan.manifest_text()
-
-    def header(units, idx, total):
-        return takeoff_batch_header(manifest, _describe(units), idx, total, user_text).replace(
-            "Produce the META block and the ROWS block for the attached pages.",
-            "Count the detailing scope on the attached pages: produce the META block and the ROWS block.")
-
-    outputs, usage = await _run_all_batches(
-        plan, system=system, header=header, label=label, progress=progress, cancelled=cancelled,
-        stage="Counting detailing scope",
-    )
-    batches = []
-    for i, o in enumerate(outputs, 1):
-        meta, rows = detailing_estimate.parse_batch(o.text)
-        batches.append({"batch": i, "meta": meta, "rows": rows})
-    est = detailing_estimate.consolidate(batches, region_hint=region_hint)
-    if not est["rows"]:
-        raise EngineError("No detailing scope could be counted from the uploaded drawings.")
-    est["engine"] = _primary_engine(outputs)
-    est["binder"] = plan.summary()
-    return est, est["engine"], usage
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -539,62 +553,122 @@ def _rebatch_ids(text: str, idx: int) -> str:
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _pre_read(files, work_dir: str, progress: ProgressFn):
+    """Run the deterministic ingestion pre-read in a worker thread (never fails the job)."""
+    if not INGEST_ENABLED or not files:
+        return None
+    try:
+        from ingest import run_ingest
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ingest_unavailable error=%s", exc)
+        return None
+    await progress("Pre-reading drawings (register, callouts, metals sweep, tiles)", 0, 1)
+    try:
+        ing = await asyncio.to_thread(run_ingest, files, work_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("ingest_failed error=%s", exc)
+        return None
+    await progress("Pre-reading drawings (register, callouts, metals sweep, tiles)", 1, 1)
+    return ing
+
+
 async def run_mode(
     *, mode_id: str, system_prompt: str, user_text: str, files: list[tuple[str, str, str]],
     skipped: list[str] | None = None, progress: ProgressFn = _noop_progress,
     cancelled: CancelFn = _never_cancel, label: str = "analysis", jurisdiction_hint: str = "USA",
-    takeoff_cache=None,
+    takeoff_cache=None, work_dir: str | None = None,
 ) -> PipelineResult:
     """Run one analysis mode over a binder and return the single final report.
 
     takeoff_cache: optional object with async get() -> dict|None and async put(dict),
-    used so MTO, Fabricator Estimation and the estimate page share one take-off.
+    used so MTO, Estimation Pro, Fabricator Estimation and the estimate page share one take-off.
+    work_dir: where the pre-read writes its artefacts (sheet_register.json, callouts.json …)
+    and tiles; a temporary directory (removed afterwards) when not given.
     """
-    plan = plan_binder(files, skipped=skipped)
+    async def waiting(_label: str) -> None:
+        await progress("Waiting for model capacity", 0, 1)
+
+    token = set_wait_hook(waiting)
+    own_work = work_dir is None
+    work = work_dir or tempfile.mkdtemp(prefix="ingest_")
     try:
-        meta = {"binder": plan.summary()}
-        if mode_id in TAKEOFF_MODES or mode_id in FAB_ESTIMATE_MODES:
-            takeoff = None
-            if mode_id in FAB_ESTIMATE_MODES and takeoff_cache is not None:
-                takeoff = await takeoff_cache.get()
-            usage = Usage()
-            if takeoff is None:
-                takeoff, _engine, usage = await run_takeoff(
-                    plan, user_text=user_text, jurisdiction_hint=jurisdiction_hint,
-                    progress=progress, cancelled=cancelled, label=label)
-                if takeoff_cache is not None:
-                    await takeoff_cache.put(takeoff)
-            meta.update(kind="takeoff", takeoff_summary=_takeoff_summary(takeoff), usage=usage.as_dict())
-            if mode_id in TAKEOFF_MODES:
-                return PipelineResult(render_mto_report(takeoff), takeoff.get("engine", engine_label("")), meta)
-            overrides = dict(takeoff.get("user_overrides") or {})
-            overrides.update(await extract_overrides(user_text))
-            est = fab_estimate.compute({**takeoff, "user_overrides": overrides})
-            meta["estimate"] = {k: est[k] for k in ("tons", "ton_name", "currency", "lock", "rate_basis")}
-            return PipelineResult(fab_estimate.render(takeoff, est, user_text=user_text),
-                                  takeoff.get("engine", engine_label("")), meta)
-
-        if mode_id in DET_ESTIMATE_MODES:
-            est, engine, usage = await run_detailing_estimate(
-                plan, user_text=user_text, region_hint=jurisdiction_hint,
-                progress=progress, cancelled=cancelled, label=label)
-            meta.update(kind="detailing_estimate", usage=usage.as_dict(), estimate={
-                k: est[k] for k in ("lock_hrs_low", "lock_hrs_high", "lock_cost_low", "lock_cost_high", "currency")})
-            return PipelineResult(detailing_estimate.render(est, user_text=user_text), engine, meta)
-
-        text, engine, usage = await run_narrative(
-            plan, system=system_prompt, user_text=user_text, label=label, progress=progress, cancelled=cancelled)
-        meta.update(kind="narrative", usage=usage.as_dict())
-        return PipelineResult(text, engine, meta)
+        if mode_id in TAKEOFF_MODES | FAB_ESTIMATE_MODES | DET_ESTIMATE_MODES:
+            return await _run_takeoff_mode(
+                mode_id=mode_id, user_text=user_text, files=files, skipped=skipped, progress=progress,
+                cancelled=cancelled, label=label, jurisdiction_hint=jurisdiction_hint,
+                takeoff_cache=takeoff_cache, work_dir=work)
+        plan = plan_binder(files, skipped=skipped)
+        try:
+            text, engine, usage = await run_narrative(
+                plan, system=system_prompt, user_text=user_text, label=label, progress=progress, cancelled=cancelled)
+            meta = {"binder": plan.summary(), "kind": "narrative", "usage": usage.as_dict()}
+            return PipelineResult(text, engine, meta)
+        finally:
+            plan.cleanup()
     finally:
-        plan.cleanup()
+        reset_wait_hook(token)
+        if own_work:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+async def _run_takeoff_mode(
+    *, mode_id: str, user_text: str, files, skipped, progress: ProgressFn, cancelled: CancelFn, label: str,
+    jurisdiction_hint: str, takeoff_cache, work_dir: str,
+) -> PipelineResult:
+    takeoff = None
+    if mode_id not in TAKEOFF_MODES and takeoff_cache is not None:
+        takeoff = await takeoff_cache.get()
+    usage = Usage()
+    if takeoff is None:
+        ing = await _pre_read(files, work_dir, progress)
+        if await cancelled():
+            raise Cancelled()
+        plan = plan_binder(files, skipped=skipped, tiles=getattr(ing, "tiles", None))
+        try:
+            takeoff, _engine, usage = await run_takeoff(
+                plan, user_text=user_text, jurisdiction_hint=jurisdiction_hint,
+                progress=progress, cancelled=cancelled, label=label, ingest=ing)
+        finally:
+            plan.cleanup()
+        if takeoff_cache is not None:
+            await takeoff_cache.put(takeoff)
+    engine = takeoff.get("engine") or engine_label("")
+    model_id = takeoff.get("model_id") or ""
+    meta = {"binder": takeoff.get("binder"), "kind": "takeoff", "takeoff_summary": _takeoff_summary(takeoff),
+            "usage": usage.as_dict(), "ingest_summary": takeoff.get("ingest_summary")}
+
+    if mode_id in TAKEOFF_MODES:
+        return PipelineResult(render_mto_report(takeoff), engine, meta, takeoff=takeoff, model_id=model_id)
+
+    if mode_id in DET_ESTIMATE_MODES:
+        await progress("Computing detailing hours", 0, 1)
+        est = detailing_estimate.from_takeoff(takeoff, region_hint=jurisdiction_hint)
+        meta.update(kind="detailing_estimate", estimate={
+            k: est.get(k) for k in ("lock_hrs_low", "lock_hrs_high", "lock_cost_low", "lock_cost_high", "currency",
+                                    "completeness", "buffer_pct")})
+        await progress("Computing detailing hours", 1, 1)
+        return PipelineResult(detailing_estimate.render(est, user_text=user_text), engine, meta,
+                              takeoff=takeoff, estimate=est, model_id=model_id)
+
+    overrides = dict(takeoff.get("user_overrides") or {})
+    overrides.update(await extract_overrides(user_text))
+    est = fab_estimate.compute({**takeoff, "user_overrides": overrides})
+    meta["estimate"] = {k: est[k] for k in ("tons", "ton_name", "currency", "lock", "rate_basis")}
+    return PipelineResult(fab_estimate.render(takeoff, est, user_text=user_text), engine, meta,
+                          takeoff=takeoff, model_id=model_id)
 
 
 def _takeoff_summary(t: dict) -> dict:
     tot = t["totals"]
+    usa = t["jurisdiction"] == "USA"
     return {
         "jurisdiction": t["jurisdiction"],
         "net_kg": tot["net_kg"], "gross_kg": tot["gross_kg"], "gross_t": tot["gross_t"],
-        "gross_short_tons": tot["gross_short_tons"], "pieces": tot["pieces"], "line_items": tot["line_items"],
-        "rfis": len(t["rfis"]), "sheets": len(t["sheets"]),
+        "gross_lb": tot.get("gross_lb"), "gross_short_tons": tot["gross_short_tons"],
+        "est_tonnage": tot.get("est_tonnage", tot["gross_short_tons"] if usa else tot["gross_t"]),
+        "est_tonnage_unit": tot.get("est_tonnage_unit", "tons" if usa else "t"),
+        "pieces": tot["pieces"], "line_items": tot["line_items"],
+        "rfis": len(t["rfis"]), "sheets": len(t.get("register") or t["sheets"]),
+        "coverage": t.get("coverage"), "confidence": t.get("confidence"),
+        "project": (t.get("project") or {}).get("name", ""),
     }

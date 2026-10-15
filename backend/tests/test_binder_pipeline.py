@@ -120,7 +120,7 @@ def test_run_mode_mto_consolidates_all_batches(tmp_path, monkeypatch):
 
     async def fake_run_batch(*, system, header_for, units, label, effort=None):
         n = int(re.search(r"batch (\d+) of", header_for(units)).group(1))
-        return [BatchOutput(ROWS % {"n": n}, units, "claude-sonnet-5-5", Usage())]
+        return [BatchOutput(ROWS % {"n": n}, units, "claude-opus-5-5", Usage())]
 
     monkeypatch.setattr(pipeline, "run_batch", fake_run_batch)
     res = asyncio.run(pipeline.run_mode(mode_id="MTO", system_prompt="", user_text="",
@@ -137,12 +137,12 @@ def test_run_mode_narrative_single_report(tmp_path, monkeypatch):
     async def fake_run_batch(*, system, header_for, units, label, effort=None):
         assert "BINDER BATCH MODE" in system
         n = int(re.search(r"batch (\d+) of", header_for(units)).group(1))
-        return [BatchOutput(f"## SECTION 12 — RFI PACKAGE\nRFI-001 batch {n}", units, "claude-sonnet-5-5", Usage())]
+        return [BatchOutput(f"## SECTION 12 — RFI PACKAGE\nRFI-001 batch {n}", units, "claude-opus-5-5", Usage())]
 
     async def fake_generate(*, system, content, label, effort=None, client=None):
         assert "CONSOLIDATION MODE" in system
         ids = re.findall(r"RFI-B\d+-\d+", content[0]["text"])
-        return GenResult("## SECTION 12 — RFI PACKAGE\n" + "\n".join(dict.fromkeys(ids)), "claude-sonnet-5-5", Usage())
+        return GenResult("## SECTION 12 — RFI PACKAGE\n" + "\n".join(dict.fromkeys(ids)), "claude-opus-5-5", Usage())
 
     monkeypatch.setattr(pipeline, "run_batch", fake_run_batch)
     monkeypatch.setattr(pipeline, "generate", fake_generate)
