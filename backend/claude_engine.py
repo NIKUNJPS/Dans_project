@@ -443,8 +443,15 @@ async def generate(
     except anthropic.NotFoundError as exc:
         raise EngineError(f"The configured model is not available to this API key ({label}): {exc}") from exc
     except Exception as exc:  # noqa: BLE001
+        msg = str(getattr(exc, "message", "") or exc)
+        if "usage limit" in msg.lower() or "credit balance" in msg.lower():
+            # Account-level spend cap / no credit: nothing to retry until the owner adds credit.
+            raise EngineError(
+                "The Anthropic API account has reached its usage limit or has no credit left. "
+                "Raise the spend limit or add credit at console.anthropic.com (Settings → Limits / Billing), "
+                "then click Try again.") from exc
         if _is_document_error(exc):
-            raise DocumentRejected(str(getattr(exc, "message", "") or exc)) from exc
+            raise DocumentRejected(msg) from exc
         logger.warning("model_failed model=%s label=%s error=%s", MODEL, label, exc)
         raise EngineError(f"STRUCTMIND CORE could not complete this step ({label}): {exc}") from exc
 
