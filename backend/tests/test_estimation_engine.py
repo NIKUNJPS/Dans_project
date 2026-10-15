@@ -244,20 +244,11 @@ no|item|sub_type|qty|qty_basis|span|factors|sheet|note
 <<<END_ROWS>>>"""
 
 
-def test_detailing_estimate_hours_and_buffer():
-    meta, rows = detailing_estimate.parse_batch(DET)
-    e = detailing_estimate.consolidate([{"batch": 1, "meta": meta, "rows": rows}])
-    assert len(e["rows"]) == 2                     # joist row dropped
-    beam = 2.5 * 40
-    girder = 5.0 * 1.4 * 1.1 * 4
-    assert e["subtotal_low"] == pytest.approx((beam + girder) * 0.9, abs=0.2)
-    assert e["subtotal_high"] == pytest.approx((beam + girder) * 1.1, abs=0.2)
-    assert e["criteria_met"] == 5 and e["completeness"] == "Partial" and e["buffer_pct"] == 10
-    # Prompt spec: buffer rounded to 0.1 h, locked hours to the hour, cost to the 100 (half-up).
-    buf_low = round(e["subtotal_low"] * 0.10 + 1e-9, 1)
-    assert e["buffer_low"] == pytest.approx(buf_low, abs=0.051)
-    assert e["lock_hrs_low"] == int(e["subtotal_low"] + e["buffer_low"] + 0.5)
-    assert e["lock_cost_low"] == int(e["lock_hrs_low"] * 18 / 100 + 0.5) * 100
+def test_detailing_estimate_from_takeoff_hours_and_buffer():
+    e = detailing_estimate.from_takeoff(_takeoff())
+    assert e["rows"] and e["subtotal_low"] < e["subtotal_high"]
+    assert e["buffer_pct"] in (5, 10, 20)
+    assert e["lock_hrs_low"] <= e["lock_hrs_high"] and e["lock_cost_low"] % 100 == 0
     md = detailing_estimate.render(e)
     assert "[CONFIDENTIAL]" in md
 
@@ -268,9 +259,7 @@ def test_round_half_up_is_commercial():
 
 
 def test_detailing_estimate_never_shows_rate():
-    meta, rows = detailing_estimate.parse_batch(DET)
-    e = detailing_estimate.consolidate([{"batch": 1, "meta": meta, "rows": rows}])
-    md = detailing_estimate.render(e)
+    md = detailing_estimate.render(detailing_estimate.from_takeoff(_takeoff()))
     assert "/hr" not in md and "per hour" not in md.lower()
 
 

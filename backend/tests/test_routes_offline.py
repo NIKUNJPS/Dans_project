@@ -45,7 +45,7 @@ async def fake_run_batch(*, system, header_for, units, label, effort=None):
     CALLS["batches"] += 1
     m = re.search(r"batch (\d+) of", header_for(units))
     n = int(m.group(1)) if m else 1
-    if "take-off engine" in system:
+    if "senior steel detailing estimator" in system:
         return [BatchOutput(ROWS % {"n": n}, units, "claude-opus-5-5", Usage())]
     return [BatchOutput(f"## SECTION 12 — RFI PACKAGE\nRFI-001 question {n}", units, "claude-opus-5-5", Usage())]
 
