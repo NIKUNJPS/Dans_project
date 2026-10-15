@@ -11,7 +11,7 @@ import logging
 from binder import plan_binder
 from estimation.takeoff import SHORT_TON_KG
 from estimation.tonnage import TakeoffCache
-from pipeline import run_detailing_estimate, run_takeoff
+from pipeline import run_takeoff
 
 logger = logging.getLogger(__name__)
 
@@ -104,25 +104,23 @@ async def extract_quantities(
     if not files:
         raise ValueError("Upload at least one drawing to run AI estimation.")
     jurisdiction = country_to_jurisdiction(country_code)
+    cache = TakeoffCache(file_ids or [])
+    takeoff = await cache.get()
+    if takeoff is None:
+        plan = plan_binder(files)
+        try:
+            kwargs = {"progress": progress} if progress else {}
+            takeoff, _engine, _usage = await run_takeoff(
+                plan, jurisdiction_hint=jurisdiction, label=session_id, **kwargs)
+        finally:
+            plan.cleanup()
+        await cache.put(takeoff)
+    engine = takeoff.get("engine", "STRUCTMIND CORE · PRO")
     if role == "fabricator":
-        cache = TakeoffCache(file_ids or [])
-        takeoff = await cache.get()
-        if takeoff is None:
-            plan = plan_binder(files)
-            try:
-                kwargs = {"progress": progress} if progress else {}
-                takeoff, _engine, _usage = await run_takeoff(
-                    plan, jurisdiction_hint=jurisdiction, label=session_id, **kwargs)
-            finally:
-                plan.cleanup()
-            await cache.put(takeoff)
-        return takeoff_to_extracted(takeoff), takeoff.get("engine", "STRUCTMIND CORE")
+        return takeoff_to_extracted(takeoff), engine
 
-    plan = plan_binder(files)
-    try:
-        kwargs = {"progress": progress} if progress else {}
-        est, engine, _usage = await run_detailing_estimate(
-            plan, region_hint=jurisdiction, label=session_id, **kwargs)
-    finally:
-        plan.cleanup()
+    # Detailers: hours computed in code from the same take-off (Estimation Pro 2C).
+    from estimation import detailing_estimate
+
+    est = detailing_estimate.from_takeoff(takeoff, region_hint=jurisdiction)
     return detailing_to_extracted(est), engine
