@@ -316,7 +316,8 @@ def apply_band_to_extracted(
         tonnage_t = float(extracted.get("tonnage_t") or extracted.get("tonnage") or 0)
         tonnage_short = float(extracted.get("tonnage_short") or (tonnage_t * 1000.0 / 907.18474))
         tonnage = tonnage_short if per_short_ton else tonnage_t
-        ton_unit = "short ton" if per_short_ton else "tonne"
+        ton_unit = "short ton" if per_short_ton else "tonne"     # data key; reports say "ton (2,000 lb)"
+        ton_display = "ton" if per_short_ton else "tonne"
         if tonnage <= 0:
             raise ValueError("AI could not extract a usable tonnage from the drawings.")
         subtotal_low  = tonnage * rate_low
@@ -380,9 +381,9 @@ def apply_band_to_extracted(
                 "final_amount_raw": _round(grand_mid),
             },
             "breakdown": [
-                {"item": "Total fabricated tonnage", "qty": _round(tonnage), "unit": ton_unit + "s"},
-                {"item": "Per-ton rate — low",       "qty": _format_money(rate_low,  c), "unit": f"/ {ton_unit}"},
-                {"item": "Per-ton rate — high",      "qty": _format_money(rate_high, c), "unit": f"/ {ton_unit}"},
+                {"item": "Estimated Tonnage",        "qty": _round(tonnage), "unit": ton_display + "s"},
+                {"item": "Per-ton rate — low",       "qty": _format_money(rate_low,  c), "unit": f"/ {ton_display}"},
+                {"item": "Per-ton rate — high",      "qty": _format_money(rate_high, c), "unit": f"/ {ton_display}"},
             ],
             "meta": {
                 "engine": "STRUCTMIND CORE",

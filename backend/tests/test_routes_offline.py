@@ -46,16 +46,16 @@ async def fake_run_batch(*, system, header_for, units, label, effort=None):
     m = re.search(r"batch (\d+) of", header_for(units))
     n = int(m.group(1)) if m else 1
     if "take-off engine" in system:
-        return [BatchOutput(ROWS % {"n": n}, units, "claude-sonnet-5-5", Usage())]
-    return [BatchOutput(f"## SECTION 12 — RFI PACKAGE\nRFI-001 question {n}", units, "claude-sonnet-5-5", Usage())]
+        return [BatchOutput(ROWS % {"n": n}, units, "claude-opus-5-5", Usage())]
+    return [BatchOutput(f"## SECTION 12 — RFI PACKAGE\nRFI-001 question {n}", units, "claude-opus-5-5", Usage())]
 
 
 async def fake_generate(*, system, content, label, effort=None, client=None):
     if label == "overrides":
-        return GenResult("{}", "claude-sonnet-5-5", Usage())
+        return GenResult("{}", "claude-opus-5-5", Usage())
     ids = re.findall(r"RFI-B\d+-\d+", content[0]["text"])
     return GenResult("## EXECUTIVE SNAPSHOT\n- ok\n\n## SECTION 12 — RFI PACKAGE\n" + "\n".join(dict.fromkeys(ids)),
-                     "claude-sonnet-5-5", Usage())
+                     "claude-opus-5-5", Usage())
 
 
 @pytest.fixture()

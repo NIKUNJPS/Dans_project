@@ -40,6 +40,10 @@ FT_TO_M = 0.3048
 IN_TO_MM = 25.4
 # Steel at 490 lb/ft³: one square inch of section, one foot long, weighs 3.4028 lb.
 LB_PER_FT_PER_IN2 = 490.0 / 144.0
+# Plates on the AISC basis: 40.8 lb per square foot per inch of thickness, so a plate
+# t × w (inches) weighs t × w × 40.8 / 12 lb per foot of length.
+PLATE_LB_PER_FT2_PER_IN = 40.8
+PLATE_LB_PER_FT_PER_IN2 = PLATE_LB_PER_FT2_PER_IN / 12.0
 # One mm² of section, one metre long, weighs 0.00785 kg.
 KG_PER_M_PER_MM2 = STEEL_DENSITY_KG_M3 / 1_000_000.0
 
@@ -284,7 +288,7 @@ def compute_unit_weight(profile: str, jurisdiction: str = "USA") -> UnitWeight |
             if not inches:
                 inches = j == "USA" and t <= 4 and w <= 120
             if inches:
-                kgm = _imperial_area_to_kgm(t * w)
+                kgm = t * w * PLATE_LB_PER_FT_PER_IN2 * LBFT_TO_KGM
                 return UnitWeight(kgm, "geometry", f"Plate {t:g} x {w:g} in", is_plate=True)
             kgm = _metric_area_to_kgm(t * w)
             return UnitWeight(kgm, "geometry", f"Plate {t:g} x {w:g} mm", is_plate=True)
@@ -479,7 +483,8 @@ def weight_table_text(jurisdiction: str = "USA") -> str:
         "  Rolled shapes: imperial W/M/S/HP/C/MC/WT = lb/ft after the 'x' (x 1.4882 = kg/m); "
         "metric W/WWF/C (CISC) = kg/m after the 'x'; UB/UC = kg/m after the code.\n"
         "  HSS/RHS/SHS: A = 2t(B+H) - 4t^2 - 3(4-pi)t^2 on nominal wall; round HSS/CHS/pipe: "
-        "A = pi(D-t)t; angles: A = t(a+b-t); plate: t x w. Steel 7850 kg/m^3 (490 lb/ft^3).\n"
+        "A = pi(D-t)t; angles: A = t(a+b-t). Steel 7850 kg/m^3 (490 lb/ft^3).\n"
+        "  Plates: imperial t x w x 40.8 lb/ft^2 per inch of thickness (t x w x 3.4 lb/ft); metric t x w x 0.00785 kg/m.\n"
         "  Verified samples:\n" + "\n".join(lines)
     )
 

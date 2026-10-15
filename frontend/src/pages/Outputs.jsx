@@ -71,7 +71,7 @@ export default function Outputs() {
     const download = async (a, exp) => {
         setDownloading(`${a.id}:${exp.fmt}`);
         try {
-            const base = fileBase(reportName(a), a.mode_label || "report");
+            const base = a.download_base || fileBase(reportName(a), a.mode_label || "report");
             await downloadFile(`/api/analyses/${a.id}/export/${exp.fmt}`, `${base}.${exp.ext}`);
         } catch (e) {
             toast.error(errMessage(e));
@@ -201,9 +201,9 @@ export default function Outputs() {
                                         {o.takeoff_summary && (
                                             <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-navy">
                                                 {(o.takeoff_summary.jurisdiction || "USA") === "USA"
-                                                    ? `${Number(o.takeoff_summary.gross_short_tons || 0).toFixed(2)} short tons`
+                                                    ? `${Number(o.takeoff_summary.est_tonnage ?? o.takeoff_summary.gross_short_tons ?? 0).toFixed(2)} tons`
                                                     : `${Number(o.takeoff_summary.gross_t || 0).toFixed(2)} t`}{" "}
-                                                estimated · {Number(o.takeoff_summary.rfis || 0).toLocaleString("en-US")} RFIs
+                                                Estimated Tonnage · {Number(o.takeoff_summary.rfis || 0).toLocaleString("en-US")} RFIs
                                             </div>
                                         )}
                                     </div>

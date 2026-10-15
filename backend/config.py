@@ -33,15 +33,20 @@ class Settings:
 
     # LLM — Claude via the Anthropic API (bring your own key)
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
-    # Every analysis runs on Sonnet 5.5, the current top Sonnet model (half Opus 5.5's price).
-    # No other model is used unless ANTHROPIC_FALLBACK_MODEL names one; it then runs only if
-    # the primary still errors after the SDK's own retries. Environment values override these.
-    anthropic_model: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5")
-    anthropic_fallback_model: str = os.environ.get("ANTHROPIC_FALLBACK_MODEL", "")
-    # Reasoning depth for analysis calls: low | medium | high | xhigh | max.
+    # Every step of every analysis runs on Claude Opus 5.5 — one model, set in ONE place.
+    # There is no fallback model: when Opus is busy or unavailable the job waits in the
+    # capacity queue and retries (ANTHROPIC_CAPACITY_WAIT_MINUTES), and if capacity still
+    # isn't there it is re-queued (ANTHROPIC_REQUEUE_*); it never drops to another model.
+    anthropic_model: str = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
+    # Reasoning depth: low | medium | high | xhigh | max. Take-off and estimation always
+    # run at the highest effort; the narrative reports use ANTHROPIC_EFFORT.
     anthropic_effort: str = os.environ.get("ANTHROPIC_EFFORT", "high")
-    # Server-side refusal fallback (Claude API only — disable on Bedrock/Vertex/Foundry).
-    anthropic_server_fallback: bool = os.environ.get("ANTHROPIC_SERVER_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
+    anthropic_effort_takeoff: str = os.environ.get("ANTHROPIC_EFFORT_TAKEOFF", "max")
+    # How long one call keeps retrying on 429 / 5xx / 529 / connection errors before the
+    # whole job is handed back to the queue.
+    anthropic_capacity_wait_minutes: int = int(os.environ.get("ANTHROPIC_CAPACITY_WAIT_MINUTES", "45"))
+    anthropic_requeue_attempts: int = int(os.environ.get("ANTHROPIC_REQUEUE_ATTEMPTS", "3"))
+    anthropic_requeue_delay_minutes: int = int(os.environ.get("ANTHROPIC_REQUEUE_DELAY_MINUTES", "15"))
     # How many page batches of one binder are read in parallel.
     batch_concurrency: int = int(os.environ.get("BATCH_CONCURRENCY", "4"))
     # Process-wide cap on simultaneous Claude calls (all users, all analyses).
